@@ -7,7 +7,10 @@ use tokio::sync::{broadcast, Mutex};
 use tokio_tungstenite::accept_async;
 use tungstenite::Message as WsMessage;
 
-use crate::protocol::{Message, StreamMode, SAMPLE_RATE, CHANNELS};
+use crate::protocol::{Message, StreamMode, CHANNELS};
+
+pub static ACTUAL_SAMPLE_RATE: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(44100);
 
 pub async fn run_server(host: &str, port: u16) -> Result<()> {
     let addr = format!("{}:{}", host, port);
@@ -15,6 +18,7 @@ pub async fn run_server(host: &str, port: u16) -> Result<()> {
     log::info!("Server listening on {}", addr);
 
     let (broadcast_tx, _) = broadcast::channel::<Vec<u8>>(100);
+    let audio_broadcast = broadcast_tx.clone();
 
     let mut shutdown_rx = {
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -52,8 +56,35 @@ pub async fn run_server(host: &str, port: u16) -> Result<()> {
         }
     });
 
+    start_audio_capture(audio_broadcast);
+
     server_handle.await?;
     Ok(())
+}
+
+fn start_audio_capture(broadcast_tx: broadcast::Sender<Vec<u8>>) {
+    std::thread::spawn(move || {
+        let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
+
+        match crate::audio::capture::AudioCapture::new(audio_tx) {
+            Ok(_capture) => {
+                log::info!("System audio capture started, streaming to clients");
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async move {
+                    while let Some(data) = audio_rx.recv().await {
+                        let _ = broadcast_tx.send(data);
+                    }
+                });
+            }
+            Err(e) => {
+                log::error!("Failed to start audio capture: {}", e);
+                log::error!("Hint: On Windows, ensure audio output is active");
+            }
+        }
+    });
 }
 
 async fn handle_connection(
@@ -76,6 +107,26 @@ async fn handle_connection(
 
     let mut client_mode: Option<StreamMode> = None;
 
+    let heartbeat_sender = ws_sender.clone();
+    let heartbeat_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+        loop {
+            interval.tick().await;
+            let ping = Message::Ping {
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+            };
+            if let Ok(json) = serde_json::to_string(&ping) {
+                let mut sender = heartbeat_sender.lock().await;
+                if sender.send(WsMessage::Text(json)).await.is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
     while let Some(msg) = ws_receiver.next().await {
         match msg {
             Ok(WsMessage::Text(text)) => {
@@ -95,9 +146,10 @@ async fn handle_connection(
                         );
 
                         let session_id = uuid::Uuid::new_v4().to_string();
+                        let actual_rate = ACTUAL_SAMPLE_RATE.load(std::sync::atomic::Ordering::Relaxed);
                         let ack = Message::HelloAck {
-                            session_id: session_id.clone(),
-                            sample_rate: SAMPLE_RATE,
+                            session_id,
+                            sample_rate: actual_rate,
                             channels: CHANNELS,
                         };
 
@@ -143,7 +195,7 @@ async fn handle_connection(
                                     }
                                 });
 
-                                log::info!("Client {} set as speaker", client_id);
+                                log::info!("Client {} set as speaker, streaming audio", client_id);
                             }
                             StreamMode::Microphone => {
                                 client_mode = Some(StreamMode::Microphone);
@@ -153,11 +205,7 @@ async fn handle_connection(
                     }
                     Some(Message::AudioData { sequence, data }) => {
                         if client_mode == Some(StreamMode::Microphone) {
-                            log::debug!(
-                                "Received audio, seq: {}, {} bytes",
-                                sequence,
-                                data.len()
-                            );
+                            log::debug!("Received audio, seq: {}, {} bytes", sequence, data.len());
 
                             let _ = broadcast_tx.send(data);
 
@@ -193,5 +241,6 @@ async fn handle_connection(
         }
     }
 
+    heartbeat_handle.abort();
     log::info!("Connection closed for {}", addr);
 }

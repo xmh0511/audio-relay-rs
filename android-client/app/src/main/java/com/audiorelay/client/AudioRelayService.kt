@@ -27,6 +27,10 @@ class AudioRelayService : Service() {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val isRunning = AtomicBoolean(false)
+    private var shouldReconnect = false
+    private var connectHost = ""
+    private var connectPort = 8080
+    private var pingJob: Job? = null
 
     var onStateChanged: ((ServiceState) -> Unit)? = null
     var onAudioLevel: ((Float) -> Unit)? = null
@@ -47,9 +51,11 @@ class AudioRelayService : Service() {
                 val host = intent.getStringExtra(EXTRA_HOST) ?: "192.168.1.100"
                 val port = intent.getIntExtra(EXTRA_PORT, 8080)
                 startForeground(NOTIFICATION_ID, buildNotification("Connecting to $host:$port…"))
+                shouldReconnect = true
                 connect(host, port)
             }
             ACTION_STOP -> {
+                shouldReconnect = false
                 stop()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
@@ -60,13 +66,15 @@ class AudioRelayService : Service() {
 
     fun connect(host: String, port: Int) {
         if (isRunning.get()) return
+
+        connectHost = host
+        connectPort = port
         isRunning.set(true)
         acquireWakeLock()
 
         val client = OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(0, TimeUnit.SECONDS)
-            .pingInterval(30, TimeUnit.SECONDS)
             .build()
 
         val request = Request.Builder()
@@ -74,6 +82,7 @@ class AudioRelayService : Service() {
             .build()
 
         updateState(ServiceState.CONNECTING)
+        updateNotification("Connecting to $host:$port…")
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -81,6 +90,7 @@ class AudioRelayService : Service() {
                 sendHello(webSocket)
                 updateNotification("Connected, waiting for handshake…")
                 updateState(ServiceState.CONNECTED)
+                startPingJob()
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -103,10 +113,20 @@ class AudioRelayService : Service() {
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.e(TAG, "WebSocket failure: ${t.message}", t)
+                Log.e(TAG, "WebSocket failure: ${t.message}")
                 handleDisconnect()
             }
         })
+    }
+
+    private fun startPingJob() {
+        pingJob?.cancel()
+        pingJob = scope.launch {
+            while (isActive) {
+                delay(15_000)
+                sendPing()
+            }
+        }
     }
 
     private fun sendHello(ws: WebSocket) {
@@ -118,7 +138,7 @@ class AudioRelayService : Service() {
                 put("channels", CHANNELS)
             })
         }
-        Log.d(TAG, "Sending Hello: $hello")
+        Log.d(TAG, "Sending Hello")
         ws.send(hello.toString())
     }
 
@@ -142,10 +162,17 @@ class AudioRelayService : Service() {
                 playAudio(data, sequence)
             }
             json.has("Pong") -> {
-                Log.d(TAG, "Pong received")
+                Log.v(TAG, "Pong")
             }
-            json.has("AudioDataAck") -> {
-                // Server acknowledged our audio data (if we were in mic mode)
+            json.has("Ping") -> {
+                val pingJson = json.getJSONObject("Ping")
+                val timestamp = pingJson.optLong("timestamp", 0)
+                val pong = JSONObject().apply {
+                    put("Pong", JSONObject().apply {
+                        put("timestamp", timestamp)
+                    })
+                }
+                webSocket?.send(pong.toString())
             }
         }
     }
@@ -153,8 +180,7 @@ class AudioRelayService : Service() {
     private fun initAudioTrack(serverSampleRate: Int) {
         audioTrack?.release()
 
-        val channelConfig = if (CHANNELS == 2)
-            AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
+        val channelConfig = AudioFormat.CHANNEL_OUT_MONO
 
         val bufferSize = AudioTrack.getMinBufferSize(
             serverSampleRate, channelConfig, AudioFormat.ENCODING_PCM_16BIT
@@ -213,16 +239,32 @@ class AudioRelayService : Service() {
 
     private fun handleDisconnect() {
         isRunning.set(false)
+        pingJob?.cancel()
         audioTrack?.release()
         audioTrack = null
-        releaseWakeLock()
-        updateState(ServiceState.DISCONNECTED)
-        updateNotification("Disconnected")
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
+
+        if (shouldReconnect) {
+            Log.d(TAG, "Connection lost, reconnecting in 3s...")
+            updateNotification("Reconnecting…")
+            updateState(ServiceState.CONNECTING)
+            scope.launch {
+                delay(3000)
+                if (shouldReconnect) {
+                    connect(connectHost, connectPort)
+                }
+            }
+        } else {
+            releaseWakeLock()
+            updateState(ServiceState.DISCONNECTED)
+            updateNotification("Disconnected")
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
     }
 
     fun stop() {
+        shouldReconnect = false
+        pingJob?.cancel()
         webSocket?.close(1000, "Client disconnect")
         webSocket = null
         isRunning.set(false)
@@ -230,7 +272,6 @@ class AudioRelayService : Service() {
         audioTrack = null
         releaseWakeLock()
         updateState(ServiceState.DISCONNECTED)
-        scope.cancel()
     }
 
     fun isConnected(): Boolean = isRunning.get()
@@ -241,7 +282,7 @@ class AudioRelayService : Service() {
             PowerManager.PARTIAL_WAKE_LOCK,
             "AudioRelay::StreamingLock"
         ).apply {
-            acquire(24 * 60 * 60 * 1000L) // 24 hours max
+            acquire(24 * 60 * 60 * 1000L)
         }
     }
 
@@ -295,6 +336,7 @@ class AudioRelayService : Service() {
 
     override fun onDestroy() {
         instance = null
+        shouldReconnect = false
         stop()
         super.onDestroy()
     }
