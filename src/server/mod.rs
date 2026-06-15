@@ -125,8 +125,11 @@ async fn start_audio_capture(state: Arc<AppState>) {
 
 async fn restart_audio_capture(state: &AppState) -> Result<()> {
     let old = state.audio_capture.write().await.take();
-    drop(old);
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    if let Some(c) = old {
+        c.stop();
+        drop(c);
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(200);
     let broadcast_tx = state.broadcast_tx.clone();
