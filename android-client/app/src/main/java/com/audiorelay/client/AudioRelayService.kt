@@ -8,6 +8,7 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
 import android.os.Build
+import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -31,6 +32,8 @@ class AudioRelayService : Service() {
     var onAudioLevel: ((Float) -> Unit)? = null
 
     private var currentState = ServiceState.DISCONNECTED
+
+    override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
