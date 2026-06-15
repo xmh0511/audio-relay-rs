@@ -69,7 +69,6 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             AudioRelayTheme {
-                val context = LocalContext.current
                 AudioRelayScreen(
                     service = service,
                     isBound = bound
@@ -118,6 +117,7 @@ fun AudioRelayScreen(
     var serverPort by remember { mutableStateOf("8080") }
     var isConnected by remember { mutableStateOf(false) }
     var audioLevel by remember { mutableFloatStateOf(0f) }
+    val context = LocalContext.current
 
     LaunchedEffect(service, isBound) {
         if (isBound && service != null) {
@@ -230,7 +230,7 @@ fun AudioRelayScreen(
                 onClick = {
                     if (!isBound || service == null) {
                         Toast.makeText(
-                            LocalContext.current,
+                            context,
                             "Service not bound, retrying…",
                             Toast.LENGTH_SHORT
                         ).show()
@@ -243,7 +243,7 @@ fun AudioRelayScreen(
                     } else {
                         val port = serverPort.toIntOrNull() ?: 8080
                         val intent = Intent(
-                            LocalContext.current,
+                            context,
                             AudioRelayService::class.java
                         ).apply {
                             action = "com.audiorelay.START"
@@ -251,12 +251,12 @@ fun AudioRelayScreen(
                             putExtra("port", port)
                         }
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                            LocalContext.current.startForegroundService(intent)
+                            context.startForegroundService(intent)
                         } else {
-                            LocalContext.current.startService(intent)
+                            context.startService(intent)
                         }
                         Toast.makeText(
-                            LocalContext.current,
+                            context,
                             "Connecting to $serverHost:$port",
                             Toast.LENGTH_SHORT
                         ).show()
