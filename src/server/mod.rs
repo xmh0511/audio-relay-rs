@@ -123,7 +123,7 @@ async fn start_audio_capture(state: Arc<AppState>) {
     }
 }
 
-async fn restart_audio_capture(state: &AppState) -> Result<()> {
+async fn restart_audio_capture(state: &AppState, rate: u32) -> Result<()> {
     let old = state.audio_capture.write().await.take();
     if let Some(c) = old {
         c.stop();
@@ -131,13 +131,19 @@ async fn restart_audio_capture(state: &AppState) -> Result<()> {
     }
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
+    let msg = Message::SampleRateChange { sample_rate: rate };
+    broadcast_to_all_clients(&state.clients, &msg).await;
+    log::info!("Notified all clients of sample rate change to {}Hz", rate);
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
     let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(200);
     let broadcast_tx = state.broadcast_tx.clone();
 
     match AudioCapture::new(audio_tx) {
         Ok(capture) => {
             *state.audio_capture.write().await = Some(capture);
-            log::info!("Audio capture restarted");
+            log::info!("Audio capture restarted at {}Hz", rate);
 
             tokio::spawn(async move {
                 while let Some(data) = audio_rx.recv().await {
@@ -431,13 +437,9 @@ async fn set_sample_rate(
 
     log::info!("Sample rate changed to {}Hz, restarting capture...", rate);
 
-    if let Err(e) = restart_audio_capture(&state).await {
+    if let Err(e) = restart_audio_capture(&state, rate).await {
         return Json(json!({ "ok": false, "error": format!("{}", e) }));
     }
 
-    let msg = Message::SampleRateChange { sample_rate: rate };
-    broadcast_to_all_clients(&state.clients, &msg).await;
-
-    log::info!("Sample rate changed to {}Hz, notified all clients", rate);
     Json(json!({ "ok": true, "sample_rate": rate }))
 }
