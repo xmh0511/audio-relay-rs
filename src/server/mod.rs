@@ -1,24 +1,53 @@
 use anyhow::Result;
+use axum::{extract::State as AxumState, extract::Json, routing::{get, post}, Router};
 use futures_util::{SinkExt, StreamExt};
+use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio_tungstenite::accept_async;
 use tungstenite::Message as WsMessage;
 
-use crate::protocol::{Message, StreamMode, CHANNELS};
+use crate::protocol::{Message, StreamMode, CHANNELS, timestamp_ms};
 
 pub static ACTUAL_SAMPLE_RATE: std::sync::atomic::AtomicU32 =
     std::sync::atomic::AtomicU32::new(44100);
 
-pub async fn run_server(host: &str, port: u16) -> Result<()> {
+pub type ClientInfo = Arc<RwLock<HashMap<String, ClientEntry>>>;
+
+#[derive(Clone, Debug)]
+pub struct ClientEntry {
+    pub client_id: String,
+    pub addr: SocketAddr,
+    pub mode: StreamMode,
+    pub latency_ms: f64,
+    pub connected_at: u64,
+}
+
+pub struct AppState {
+    pub clients: ClientInfo,
+    pub sample_rate: Arc<RwLock<u32>>,
+}
+
+pub async fn run_server(host: &str, port: u16, web_port: u16) -> Result<()> {
     let addr = format!("{}:{}", host, port);
     let listener = TcpListener::bind(&addr).await?;
     log::info!("Server listening on {}", addr);
 
-    let (broadcast_tx, _) = broadcast::channel::<Vec<u8>>(100);
-    let audio_broadcast = broadcast_tx.clone();
+    let (broadcast_tx, _) = broadcast::channel::<Vec<u8>>(200);
+
+    let state = Arc::new(AppState {
+        clients: Arc::new(RwLock::new(HashMap::new())),
+        sample_rate: Arc::new(RwLock::new(ACTUAL_SAMPLE_RATE.load(std::sync::atomic::Ordering::Relaxed))),
+    });
+
+    let web_state = state.clone();
+
+    tokio::spawn(async move {
+        start_web_server(web_port, web_state).await;
+    });
 
     let mut shutdown_rx = {
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -32,6 +61,7 @@ pub async fn run_server(host: &str, port: u16) -> Result<()> {
     };
 
     let server_broadcast = broadcast_tx.clone();
+    let server_clients = state.clients.clone();
 
     let server_handle = tokio::spawn(async move {
         loop {
@@ -41,7 +71,9 @@ pub async fn run_server(host: &str, port: u16) -> Result<()> {
                         Ok((stream, addr)) => {
                             log::info!("New connection from {}", addr);
                             let broadcast = server_broadcast.clone();
-                            tokio::spawn(handle_connection(stream, addr, broadcast));
+                            let clients = server_clients.clone();
+                            let state_clone = state.clone();
+                            tokio::spawn(handle_connection(stream, addr, broadcast, clients, state_clone));
                         }
                         Err(e) => {
                             log::error!("Accept error: {}", e);
@@ -56,7 +88,7 @@ pub async fn run_server(host: &str, port: u16) -> Result<()> {
         }
     });
 
-    start_audio_capture(audio_broadcast);
+    start_audio_capture(broadcast_tx.clone());
 
     server_handle.await?;
     Ok(())
@@ -64,11 +96,11 @@ pub async fn run_server(host: &str, port: u16) -> Result<()> {
 
 fn start_audio_capture(broadcast_tx: broadcast::Sender<Vec<u8>>) {
     std::thread::spawn(move || {
-        let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
+        let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(200);
 
         match crate::audio::capture::AudioCapture::new(audio_tx) {
             Ok(_capture) => {
-                log::info!("System audio capture started, streaming to clients");
+                log::info!("System audio capture started");
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
@@ -81,7 +113,6 @@ fn start_audio_capture(broadcast_tx: broadcast::Sender<Vec<u8>>) {
             }
             Err(e) => {
                 log::error!("Failed to start audio capture: {}", e);
-                log::error!("Hint: On Windows, ensure audio output is active");
             }
         }
     });
@@ -91,6 +122,8 @@ async fn handle_connection(
     stream: TcpStream,
     addr: SocketAddr,
     broadcast_tx: broadcast::Sender<Vec<u8>>,
+    clients: ClientInfo,
+    state: Arc<AppState>,
 ) {
     let ws_stream = match accept_async(stream).await {
         Ok(ws) => ws,
@@ -106,18 +139,14 @@ async fn handle_connection(
     let ws_sender = Arc::new(Mutex::new(ws_sender));
 
     let mut client_mode: Option<StreamMode> = None;
+    let mut client_id: Option<String> = None;
 
     let heartbeat_sender = ws_sender.clone();
     let heartbeat_handle = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
         loop {
             interval.tick().await;
-            let ping = Message::Ping {
-                timestamp: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64,
-            };
+            let ping = Message::Ping { timestamp: timestamp_ms() };
             if let Ok(json) = serde_json::to_string(&ping) {
                 let mut sender = heartbeat_sender.lock().await;
                 if sender.send(WsMessage::Text(json)).await.is_err() {
@@ -132,21 +161,19 @@ async fn handle_connection(
             Ok(WsMessage::Text(text)) => {
                 match Message::from_json_bytes(text.as_bytes()) {
                     Some(Message::Hello {
-                        client_id,
+                        client_id: id,
                         mode,
                         sample_rate,
                         channels,
                     }) => {
                         log::info!(
                             "Client {} connected, mode: {:?}, {}Hz, {}ch",
-                            client_id,
-                            mode,
-                            sample_rate,
-                            channels
+                            id, mode, sample_rate, channels
                         );
 
-                        let session_id = uuid::Uuid::new_v4().to_string();
                         let actual_rate = ACTUAL_SAMPLE_RATE.load(std::sync::atomic::Ordering::Relaxed);
+
+                        let session_id = uuid::Uuid::new_v4().to_string();
                         let ack = Message::HelloAck {
                             session_id,
                             sample_rate: actual_rate,
@@ -158,55 +185,62 @@ async fn handle_connection(
                             let _ = sender.send(WsMessage::Text(ack_bytes)).await;
                         }
 
+                        clients.write().await.insert(
+                            id.clone(),
+                            ClientEntry {
+                                client_id: id.clone(),
+                                addr,
+                                mode: mode.clone(),
+                                latency_ms: 0.0,
+                                connected_at: timestamp_ms(),
+                            },
+                        );
+
+                        client_id = Some(id.clone());
+                        client_mode = Some(mode.clone());
+
                         match mode {
                             StreamMode::Speaker => {
                                 let mut broadcast_rx = broadcast_tx.subscribe();
-                                client_mode = Some(StreamMode::Speaker);
                                 let speaker_sender = ws_sender.clone();
+                                let client_id_for_task = id.clone();
 
                                 tokio::spawn(async move {
                                     let mut seq: u64 = 0;
-                                    let mut sender = speaker_sender.lock().await;
                                     loop {
                                         match broadcast_rx.recv().await {
                                             Ok(data) => {
                                                 let msg = Message::AudioData {
                                                     sequence: seq,
+                                                    timestamp: timestamp_ms(),
                                                     data,
                                                 };
                                                 seq += 1;
                                                 if let Ok(json) = serde_json::to_string(&msg) {
-                                                    if sender
-                                                        .send(WsMessage::Text(json))
-                                                        .await
-                                                        .is_err()
-                                                    {
+                                                    let mut sender = speaker_sender.lock().await;
+                                                    if sender.send(WsMessage::Text(json)).await.is_err() {
+                                                        log::info!("Speaker {} disconnected", client_id_for_task);
                                                         break;
                                                     }
                                                 }
                                             }
                                             Err(broadcast::error::RecvError::Lagged(n)) => {
-                                                log::warn!("Speaker client lagged, skipped {} messages", n);
+                                                log::warn!("Lagged {} messages", n);
                                             }
-                                            Err(broadcast::error::RecvError::Closed) => {
-                                                break;
-                                            }
+                                            Err(broadcast::error::RecvError::Closed) => break,
                                         }
                                     }
                                 });
 
-                                log::info!("Client {} set as speaker, streaming audio", client_id);
+                                log::info!("Client {} set as speaker", id);
                             }
                             StreamMode::Microphone => {
-                                client_mode = Some(StreamMode::Microphone);
-                                log::info!("Client {} set as microphone", client_id);
+                                log::info!("Client {} set as microphone", id);
                             }
                         }
                     }
-                    Some(Message::AudioData { sequence, data }) => {
+                    Some(Message::AudioData { sequence, data, .. }) => {
                         if client_mode == Some(StreamMode::Microphone) {
-                            log::debug!("Received audio, seq: {}, {} bytes", sequence, data.len());
-
                             let _ = broadcast_tx.send(data);
 
                             let ack = Message::AudioDataAck { sequence };
@@ -216,11 +250,27 @@ async fn handle_connection(
                             }
                         }
                     }
+                    Some(Message::Pong { timestamp }) => {
+                        let now = timestamp_ms();
+                        let latency = (now as f64 - timestamp as f64) / 2.0;
+                        if let Some(ref id) = client_id {
+                            if let Some(entry) = clients.write().await.get_mut(id) {
+                                entry.latency_ms = latency;
+                            }
+                        }
+                    }
                     Some(Message::Ping { timestamp }) => {
                         let pong = Message::Pong { timestamp };
                         if let Ok(json) = serde_json::to_string(&pong) {
                             let mut sender = ws_sender.lock().await;
                             let _ = sender.send(WsMessage::Text(json)).await;
+                        }
+                    }
+                    Some(Message::LatencyReport { latency_ms }) => {
+                        if let Some(ref id) = client_id {
+                            if let Some(entry) = clients.write().await.get_mut(id) {
+                                entry.latency_ms = latency_ms;
+                            }
                         }
                     }
                     Some(_) => {}
@@ -242,5 +292,61 @@ async fn handle_connection(
     }
 
     heartbeat_handle.abort();
+    if let Some(id) = &client_id {
+        clients.write().await.remove(id);
+        log::info!("Client {} removed", id);
+    }
     log::info!("Connection closed for {}", addr);
+}
+
+async fn start_web_server(port: u16, state: Arc<AppState>) {
+    let app = Router::new()
+        .route("/", get(index_page))
+        .route("/api/clients", get(get_clients))
+        .route("/api/sample-rate", get(get_sample_rate).post(set_sample_rate))
+        .with_state(state);
+
+    let addr = format!("0.0.0.0:{}", port);
+    log::info!("Management UI at http://{}", addr);
+
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    axum::serve(listener, app).await.unwrap();
+}
+
+async fn index_page() -> axum::response::Html<&'static str> {
+    axum::response::Html(include_str!("web/index.html"))
+}
+
+async fn get_clients(AxumState(state): AxumState<Arc<AppState>>) -> Json<Value> {
+    let clients = state.clients.read().await;
+    let list: Vec<Value> = clients.values().map(|c| {
+        json!({
+            "client_id": c.client_id,
+            "addr": c.addr.to_string(),
+            "mode": format!("{:?}", c.mode),
+            "latency_ms": (c.latency_ms * 100.0).round() / 100.0,
+            "connected_at": c.connected_at,
+        })
+    }).collect();
+    Json(json!({ "clients": list }))
+}
+
+async fn get_sample_rate(AxumState(state): AxumState<Arc<AppState>>) -> Json<Value> {
+    let rate = *state.sample_rate.read().await;
+    Json(json!({ "sample_rate": rate }))
+}
+
+async fn set_sample_rate(
+    AxumState(state): AxumState<Arc<AppState>>,
+    Json(payload): Json<Value>,
+) -> Json<Value> {
+    if let Some(rate) = payload.get("sample_rate").and_then(|v| v.as_u64()) {
+        let rate = rate as u32;
+        *state.sample_rate.write().await = rate;
+        ACTUAL_SAMPLE_RATE.store(rate, std::sync::atomic::Ordering::Relaxed);
+        log::info!("Sample rate changed to {}Hz", rate);
+        Json(json!({ "ok": true, "sample_rate": rate }))
+    } else {
+        Json(json!({ "ok": false, "error": "missing sample_rate" }))
+    }
 }

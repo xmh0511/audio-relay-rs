@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Audio Relay - Management</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #1a1a2e; color: #eee; min-height: 100vh; }
+.container { max-width: 800px; margin: 0 auto; padding: 24px; }
+h1 { font-size: 28px; margin-bottom: 8px; color: #fff; }
+.subtitle { color: #888; margin-bottom: 32px; font-size: 14px; }
+.card { background: #16213e; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+.card h2 { font-size: 18px; margin-bottom: 16px; color: #533483; }
+.setting-row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.setting-row label { font-size: 14px; color: #aaa; min-width: 120px; }
+.setting-row select, .setting-row input { background: #1a1a2e; border: 1px solid #333; color: #fff; padding: 8px 12px; border-radius: 8px; font-size: 14px; }
+.setting-row button { background: #533483; color: #fff; border: none; padding: 8px 20px; border-radius: 8px; cursor: pointer; font-size: 14px; }
+.setting-row button:hover { background: #6a42a0; }
+.client-table { width: 100%; border-collapse: collapse; }
+.client-table th { text-align: left; padding: 10px 12px; border-bottom: 2px solid #333; color: #888; font-size: 12px; text-transform: uppercase; }
+.client-table td { padding: 12px; border-bottom: 1px solid #222; font-size: 14px; }
+.latency { font-weight: bold; }
+.latency.good { color: #4CAF50; }
+.latency.ok { color: #FF9800; }
+.latency.bad { color: #E94560; }
+.mode-speaker { background: #533483; color: #fff; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
+.mode-mic { background: #E94560; color: #fff; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
+.empty { color: #555; text-align: center; padding: 40px; font-size: 14px; }
+.status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+.status-dot.on { background: #4CAF50; }
+.status-dot.off { background: #E94560; }
+</style>
+</head>
+<body>
+<div class="container">
+    <h1>Audio Relay</h1>
+    <p class="subtitle">Server Management</p>
+
+    <div class="card">
+        <h2>Audio Settings</h2>
+        <div class="setting-row">
+            <label>Sample Rate</label>
+            <select id="sampleRate">
+                <option value="22050">22050 Hz</option>
+                <option value="44100" selected>44100 Hz</option>
+                <option value="48000">48000 Hz</option>
+                <option value="96000">96000 Hz</option>
+            </select>
+            <button onclick="setSampleRate()">Apply</button>
+        </div>
+        <div id="rateStatus" style="font-size:12px;color:#888;margin-top:4px;"></div>
+    </div>
+
+    <div class="card">
+        <h2>Connected Devices <span id="clientCount" style="font-size:14px;color:#888;"></span></h2>
+        <div id="clientList">
+            <div class="empty">No devices connected</div>
+        </div>
+    </div>
+</div>
+
+<script>
+async function fetchClients() {
+    try {
+        const res = await fetch('/api/clients');
+        const data = await res.json();
+        const list = data.clients || [];
+        document.getElementById('clientCount').textContent = `(${list.length})`;
+
+        if (list.length === 0) {
+            document.getElementById('clientList').innerHTML = '<div class="empty">No devices connected</div>';
+            return;
+        }
+
+        let html = '<table class="client-table"><thead><tr><th>Device</th><th>Mode</th><th>Latency</th><th>IP</th></tr></thead><tbody>';
+        for (const c of list) {
+            const latClass = c.latency_ms < 50 ? 'good' : c.latency_ms < 150 ? 'ok' : 'bad';
+            const modeClass = c.mode === 'Speaker' ? 'mode-speaker' : 'mode-mic';
+            html += `<tr>
+                <td>${esc(c.client_id)}</td>
+                <td><span class="${modeClass}">${c.mode}</span></td>
+                <td><span class="latency ${latClass}">${c.latency_ms} ms</span></td>
+                <td>${esc(c.addr)}</td>
+            </tr>`;
+        }
+        html += '</tbody></table>';
+        document.getElementById('clientList').innerHTML = html;
+    } catch (e) {
+        console.error(e);
+    }
+}
+
+async function fetchSampleRate() {
+    try {
+        const res = await fetch('/api/sample-rate');
+        const data = await res.json();
+        document.getElementById('sampleRate').value = data.sample_rate;
+    } catch (e) {}
+}
+
+async function setSampleRate() {
+    const rate = parseInt(document.getElementById('sampleRate').value);
+    const status = document.getElementById('rateStatus');
+    try {
+        const res = await fetch('/api/sample-rate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sample_rate: rate })
+        });
+        const data = await res.json();
+        if (data.ok) {
+            status.textContent = 'Applied: ' + data.sample_rate + ' Hz';
+            status.style.color = '#4CAF50';
+        } else {
+            status.textContent = 'Error: ' + data.error;
+            status.style.color = '#E94560';
+        }
+    } catch (e) {
+        status.textContent = 'Request failed';
+        status.style.color = '#E94560';
+    }
+}
+
+function esc(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+}
+
+fetchClients();
+fetchSampleRate();
+setInterval(fetchClients, 2000);
+</script>
+</body>
+</html>

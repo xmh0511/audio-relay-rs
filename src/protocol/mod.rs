@@ -2,8 +2,6 @@ use serde::{Deserialize, Serialize};
 
 pub const SAMPLE_RATE: u32 = 44100;
 pub const CHANNELS: u16 = 1;
-pub const BITS_PER_SAMPLE: u16 = 16;
-pub const BUFFER_SIZE: usize = 4096;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Message {
@@ -20,6 +18,7 @@ pub enum Message {
     },
     AudioData {
         sequence: u64,
+        timestamp: u64,
         data: Vec<u8>,
     },
     AudioDataAck {
@@ -30,6 +29,12 @@ pub enum Message {
     },
     Pong {
         timestamp: u64,
+    },
+    LatencyReport {
+        latency_ms: f64,
+    },
+    SampleRateChange {
+        sample_rate: u32,
     },
     StreamStart {
         direction: StreamDirection,
@@ -61,4 +66,11 @@ impl Message {
     pub fn from_json_bytes(bytes: &[u8]) -> Option<Self> {
         serde_json::from_slice(bytes).ok()
     }
+}
+
+pub fn timestamp_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }

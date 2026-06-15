@@ -75,6 +75,7 @@ pub async fn run_client(server_host: &str, port: u16, as_mic: bool) -> Result<()
                 while let Some(data) = audio_rx.recv().await {
                     let msg = Message::AudioData {
                         sequence: audio_seq,
+                        timestamp: crate::protocol::timestamp_ms(),
                         data,
                     };
                     audio_seq += 1;
@@ -109,7 +110,7 @@ pub async fn run_client(server_host: &str, port: u16, as_mic: bool) -> Result<()
                 while let Some(msg) = ws_receiver.next().await {
                     match msg {
                         Ok(WsMessage::Text(text)) => {
-                            if let Some(Message::AudioData { sequence: _, data }) =
+                            if let Some(Message::AudioData { data, .. }) =
                                 Message::from_json_bytes(text.as_bytes())
                             {
                                 let _ = audio_tx.send(data).await;

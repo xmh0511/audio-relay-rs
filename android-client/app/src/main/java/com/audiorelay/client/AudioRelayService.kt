@@ -39,8 +39,10 @@ class AudioRelayService : Service() {
 
     var onStateChanged: ((ServiceState) -> Unit)? = null
     var onAudioLevel: ((Float) -> Unit)? = null
+    var onLatencyUpdate: ((Float, Float) -> Unit)? = null
 
     private var currentState = ServiceState.DISCONNECTED
+    private var latencySamples = mutableListOf<Float>()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -169,7 +171,16 @@ class AudioRelayService : Service() {
                 playAudio(data, sequence)
             }
             json.has("Pong") -> {
-                Log.v(TAG, "Pong")
+                val pongJson = json.getJSONObject("Pong")
+                val sentTimestamp = pongJson.optLong("timestamp", 0)
+                val now = System.currentTimeMillis()
+                val latency = (now - sentTimestamp).toFloat()
+                latencySamples.add(latency)
+                if (latencySamples.size > 60) {
+                    latencySamples.removeAt(0)
+                }
+                val avg = latencySamples.average().toFloat()
+                onLatencyUpdate?.invoke(latency, avg)
             }
             json.has("Ping") -> {
                 val pingJson = json.getJSONObject("Ping")
@@ -285,6 +296,9 @@ class AudioRelayService : Service() {
     }
 
     fun isConnected(): Boolean = isRunning.get()
+
+    fun getLatency(): Float = latencySamples.lastOrNull() ?: 0f
+    fun getAvgLatency(): Float = latencySamples.average().toFloat()
 
     private fun registerNetworkCallback() {
         val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager

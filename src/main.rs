@@ -22,6 +22,8 @@ enum Commands {
         host: String,
         #[arg(short, long, default_value = "8080")]
         port: u16,
+        #[arg(long, default_value = "8081")]
+        web_port: u16,
     },
     Client {
         #[arg(short, long)]
@@ -46,9 +48,10 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Server { host, port } => {
+        Commands::Server { host, port, web_port } => {
             log::info!("Starting AudioRelay Server on {}:{}", host, port);
-            server::run_server(&host, port).await?;
+            log::info!("Management UI at http://{}:{}", host, web_port);
+            server::run_server(&host, port, web_port).await?;
         }
         Commands::Client {
             server,

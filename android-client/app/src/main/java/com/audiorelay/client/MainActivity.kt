@@ -93,6 +93,8 @@ fun AudioRelayScreen() {
     var serverPort by remember { mutableStateOf("8080") }
     var isPlaying by remember { mutableStateOf(false) }
     var audioLevel by remember { mutableFloatStateOf(0f) }
+    var latency by remember { mutableFloatStateOf(0f) }
+    var avgLatency by remember { mutableFloatStateOf(0f) }
     val context = LocalContext.current
 
     LaunchedEffect(Unit) {
@@ -101,8 +103,12 @@ fun AudioRelayScreen() {
             if (svc != null) {
                 svc.onAudioLevel = { audioLevel = it }
                 isPlaying = svc.isConnected()
+                latency = svc.getLatency()
+                avgLatency = svc.getAvgLatency()
             } else {
                 isPlaying = false
+                latency = 0f
+                avgLatency = 0f
             }
             kotlinx.coroutines.delay(500)
         }
@@ -243,6 +249,50 @@ fun AudioRelayScreen() {
                     color = Color.White.copy(alpha = 0.7f),
                     fontSize = 14.sp
                 )
+            }
+
+            if (isPlaying) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(24.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = "Latency",
+                            color = Color.White.copy(alpha = 0.5f),
+                            fontSize = 11.sp
+                        )
+                        Text(
+                            text = "${String.format("%.0f", latency)}ms",
+                            color = when {
+                                latency < 50 -> Color(0xFF4CAF50)
+                                latency < 150 -> Color(0xFFFF9800)
+                                else -> Color(0xFFE94560)
+                            },
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = "Avg Latency",
+                            color = Color.White.copy(alpha = 0.5f),
+                            fontSize = 11.sp
+                        )
+                        Text(
+                            text = "${String.format("%.0f", avgLatency)}ms",
+                            color = when {
+                                avgLatency < 50 -> Color(0xFF4CAF50)
+                                avgLatency < 150 -> Color(0xFFFF9800)
+                                else -> Color(0xFFE94560)
+                            },
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
             }
         }
     }
