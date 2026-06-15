@@ -192,6 +192,12 @@ class AudioRelayService : Service() {
                 }
                 webSocket?.send(pong.toString())
             }
+            json.has("SampleRateChange") -> {
+                val change = json.getJSONObject("SampleRateChange")
+                val newRate = change.optInt("sample_rate", SAMPLE_RATE)
+                Log.d(TAG, "SampleRateChange: ${newRate}Hz, rebuilding AudioTrack")
+                initAudioTrack(newRate)
+            }
         }
     }
 

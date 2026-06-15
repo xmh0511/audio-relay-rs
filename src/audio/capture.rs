@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 pub struct AudioCapture {
@@ -6,22 +7,32 @@ pub struct AudioCapture {
     inner: capture_windows::WindowsCapture,
     #[cfg(not(target_os = "windows"))]
     inner: capture_cpal::CpalCapture,
+    stop_flag: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AudioCapture {
     pub fn new(tx: mpsc::Sender<Vec<u8>>) -> Result<Self> {
+        let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = stop_flag.clone();
+
         #[cfg(target_os = "windows")]
         {
             Ok(Self {
-                inner: capture_windows::WindowsCapture::new(tx)?,
+                inner: capture_windows::WindowsCapture::new(tx, flag)?,
+                stop_flag,
             })
         }
         #[cfg(not(target_os = "windows"))]
         {
             Ok(Self {
-                inner: capture_cpal::CpalCapture::new(tx)?,
+                inner: capture_cpal::CpalCapture::new(tx, flag)?,
+                stop_flag,
             })
         }
+    }
+
+    pub fn stop(&self) {
+        self.stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -29,6 +40,7 @@ impl AudioCapture {
 mod capture_windows {
     use anyhow::Result;
     use std::collections::VecDeque;
+    use std::sync::Arc;
     use tokio::sync::mpsc;
     use wasapi::*;
 
@@ -37,7 +49,7 @@ mod capture_windows {
     }
 
     impl WindowsCapture {
-        pub fn new(tx: mpsc::Sender<Vec<u8>>) -> Result<Self> {
+        pub fn new(tx: mpsc::Sender<Vec<u8>>, stop_flag: Arc<std::sync::atomic::AtomicBool>) -> Result<Self> {
             let handle = std::thread::Builder::new()
                 .name("wasapi-loopback".to_string())
                 .spawn(move || {
@@ -150,6 +162,12 @@ mod capture_windows {
                     log::info!("Loopback capture started");
 
                     loop {
+                        if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                            log::info!("Loopback capture stopping");
+                            let _ = audio_client.stop_stream();
+                            break;
+                        }
+
                         let _ = capture_client.read_from_device_to_deque(&mut sample_queue);
 
                         let frame_size = blockalign;
@@ -237,7 +255,7 @@ mod capture_cpal {
     use anyhow::{Context, Result};
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use cpal::Stream;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, atomic::AtomicBool};
     use tokio::sync::mpsc;
 
     pub struct CpalCapture {
@@ -245,7 +263,7 @@ mod capture_cpal {
     }
 
     impl CpalCapture {
-        pub fn new(tx: mpsc::Sender<Vec<u8>>) -> Result<Self> {
+        pub fn new(tx: mpsc::Sender<Vec<u8>>, _stop_flag: Arc<std::sync::atomic::AtomicBool>) -> Result<Self> {
             let host = cpal::default_host();
 
             let device = host

@@ -10,6 +10,7 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio_tungstenite::accept_async;
 use tungstenite::Message as WsMessage;
 
+use crate::audio::capture::AudioCapture;
 use crate::protocol::{Message, StreamMode, CHANNELS, timestamp_ms};
 
 pub static ACTUAL_SAMPLE_RATE: std::sync::atomic::AtomicU32 =
@@ -17,18 +18,21 @@ pub static ACTUAL_SAMPLE_RATE: std::sync::atomic::AtomicU32 =
 
 pub type ClientInfo = Arc<RwLock<HashMap<String, ClientEntry>>>;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ClientEntry {
     pub client_id: String,
     pub addr: SocketAddr,
     pub mode: StreamMode,
     pub latency_ms: f64,
     pub connected_at: u64,
+    pub ws_sender: Arc<Mutex<Option<WsSplitSink>>>,
 }
 
 pub struct AppState {
     pub clients: ClientInfo,
     pub sample_rate: Arc<RwLock<u32>>,
+    pub audio_capture: Arc<RwLock<Option<AudioCapture>>>,
+    pub broadcast_tx: broadcast::Sender<Vec<u8>>,
 }
 
 pub async fn run_server(host: &str, port: u16, web_port: u16) -> Result<()> {
@@ -40,11 +44,14 @@ pub async fn run_server(host: &str, port: u16, web_port: u16) -> Result<()> {
 
     let state = Arc::new(AppState {
         clients: Arc::new(RwLock::new(HashMap::new())),
-        sample_rate: Arc::new(RwLock::new(ACTUAL_SAMPLE_RATE.load(std::sync::atomic::Ordering::Relaxed))),
+        sample_rate: Arc::new(RwLock::new(
+            ACTUAL_SAMPLE_RATE.load(std::sync::atomic::Ordering::Relaxed),
+        )),
+        audio_capture: Arc::new(RwLock::new(None)),
+        broadcast_tx: broadcast_tx.clone(),
     });
 
     let web_state = state.clone();
-
     tokio::spawn(async move {
         start_web_server(web_port, web_state).await;
     });
@@ -62,6 +69,7 @@ pub async fn run_server(host: &str, port: u16, web_port: u16) -> Result<()> {
 
     let server_broadcast = broadcast_tx.clone();
     let server_clients = state.clients.clone();
+    let state_for_accept = state.clone();
 
     let server_handle = tokio::spawn(async move {
         loop {
@@ -72,7 +80,7 @@ pub async fn run_server(host: &str, port: u16, web_port: u16) -> Result<()> {
                             log::info!("New connection from {}", addr);
                             let broadcast = server_broadcast.clone();
                             let clients = server_clients.clone();
-                            let state_clone = state.clone();
+                            let state_clone = state_for_accept.clone();
                             tokio::spawn(handle_connection(stream, addr, broadcast, clients, state_clone));
                         }
                         Err(e) => {
@@ -88,35 +96,64 @@ pub async fn run_server(host: &str, port: u16, web_port: u16) -> Result<()> {
         }
     });
 
-    start_audio_capture(broadcast_tx.clone());
+    start_audio_capture(state.clone()).await;
 
     server_handle.await?;
     Ok(())
 }
 
-fn start_audio_capture(broadcast_tx: broadcast::Sender<Vec<u8>>) {
-    std::thread::spawn(move || {
-        let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(200);
+async fn start_audio_capture(state: Arc<AppState>) {
+    let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(200);
+    let broadcast_tx = state.broadcast_tx.clone();
 
-        match crate::audio::capture::AudioCapture::new(audio_tx) {
-            Ok(_capture) => {
-                log::info!("System audio capture started");
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap();
-                rt.block_on(async move {
-                    while let Some(data) = audio_rx.recv().await {
-                        let _ = broadcast_tx.send(data);
-                    }
-                });
-            }
-            Err(e) => {
-                log::error!("Failed to start audio capture: {}", e);
-            }
+    match AudioCapture::new(audio_tx) {
+        Ok(capture) => {
+            *state.audio_capture.write().await = Some(capture);
+            log::info!("System audio capture started");
+
+            tokio::spawn(async move {
+                while let Some(data) = audio_rx.recv().await {
+                    let _ = broadcast_tx.send(data);
+                }
+            });
         }
-    });
+        Err(e) => {
+            log::error!("Failed to start audio capture: {}", e);
+        }
+    }
 }
+
+async fn restart_audio_capture(state: &AppState) -> Result<()> {
+    let old = state.audio_capture.write().await.take();
+    drop(old);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(200);
+    let broadcast_tx = state.broadcast_tx.clone();
+
+    match AudioCapture::new(audio_tx) {
+        Ok(capture) => {
+            *state.audio_capture.write().await = Some(capture);
+            log::info!("Audio capture restarted");
+
+            tokio::spawn(async move {
+                while let Some(data) = audio_rx.recv().await {
+                    let _ = broadcast_tx.send(data);
+                }
+            });
+            Ok(())
+        }
+        Err(e) => {
+            log::error!("Failed to restart audio capture: {}", e);
+            Err(e)
+        }
+    }
+}
+
+type WsSplitSink = futures_util::stream::SplitSink<
+    tokio_tungstenite::WebSocketStream<TcpStream>,
+    WsMessage,
+>;
 
 async fn handle_connection(
     stream: TcpStream,
@@ -135,8 +172,8 @@ async fn handle_connection(
 
     log::info!("WebSocket connection established with {}", addr);
 
-    let (ws_sender, mut ws_receiver) = ws_stream.split();
-    let ws_sender = Arc::new(Mutex::new(ws_sender));
+    let (ws_sender_raw, mut ws_receiver) = ws_stream.split();
+    let ws_sender: Arc<Mutex<Option<WsSplitSink>>> = Arc::new(Mutex::new(Some(ws_sender_raw)));
 
     let mut client_mode: Option<StreamMode> = None;
     let mut client_id: Option<String> = None;
@@ -146,11 +183,15 @@ async fn handle_connection(
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
         loop {
             interval.tick().await;
-            let ping = Message::Ping { timestamp: timestamp_ms() };
+            let ping = Message::Ping {
+                timestamp: timestamp_ms(),
+            };
             if let Ok(json) = serde_json::to_string(&ping) {
-                let mut sender = heartbeat_sender.lock().await;
-                if sender.send(WsMessage::Text(json)).await.is_err() {
-                    break;
+                let mut guard = heartbeat_sender.lock().await;
+                if let Some(sender) = guard.as_mut() {
+                    if sender.send(WsMessage::Text(json)).await.is_err() {
+                        break;
+                    }
                 }
             }
         }
@@ -171,7 +212,8 @@ async fn handle_connection(
                             id, mode, sample_rate, channels
                         );
 
-                        let actual_rate = ACTUAL_SAMPLE_RATE.load(std::sync::atomic::Ordering::Relaxed);
+                        let actual_rate = ACTUAL_SAMPLE_RATE
+                            .load(std::sync::atomic::Ordering::Relaxed);
 
                         let session_id = uuid::Uuid::new_v4().to_string();
                         let ack = Message::HelloAck {
@@ -181,8 +223,10 @@ async fn handle_connection(
                         };
 
                         if let Ok(ack_bytes) = serde_json::to_string(&ack) {
-                            let mut sender = ws_sender.lock().await;
-                            let _ = sender.send(WsMessage::Text(ack_bytes)).await;
+                            let mut guard = ws_sender.lock().await;
+                            if let Some(sender) = guard.as_mut() {
+                                let _ = sender.send(WsMessage::Text(ack_bytes)).await;
+                            }
                         }
 
                         clients.write().await.insert(
@@ -193,6 +237,7 @@ async fn handle_connection(
                                 mode: mode.clone(),
                                 latency_ms: 0.0,
                                 connected_at: timestamp_ms(),
+                                ws_sender: ws_sender.clone(),
                             },
                         );
 
@@ -217,10 +262,20 @@ async fn handle_connection(
                                                 };
                                                 seq += 1;
                                                 if let Ok(json) = serde_json::to_string(&msg) {
-                                                    let mut sender = speaker_sender.lock().await;
-                                                    if sender.send(WsMessage::Text(json)).await.is_err() {
-                                                        log::info!("Speaker {} disconnected", client_id_for_task);
-                                                        break;
+                                                    let mut guard =
+                                                        speaker_sender.lock().await;
+                                                    if let Some(sender) = guard.as_mut() {
+                                                        if sender
+                                                            .send(WsMessage::Text(json))
+                                                            .await
+                                                            .is_err()
+                                                        {
+                                                            log::info!(
+                                                                "Speaker {} disconnected",
+                                                                client_id_for_task
+                                                            );
+                                                            break;
+                                                        }
                                                     }
                                                 }
                                             }
@@ -245,8 +300,10 @@ async fn handle_connection(
 
                             let ack = Message::AudioDataAck { sequence };
                             if let Ok(ack_bytes) = serde_json::to_string(&ack) {
-                                let mut sender = ws_sender.lock().await;
-                                let _ = sender.send(WsMessage::Text(ack_bytes)).await;
+                                let mut guard = ws_sender.lock().await;
+                                if let Some(sender) = guard.as_mut() {
+                                    let _ = sender.send(WsMessage::Text(ack_bytes)).await;
+                                }
                             }
                         }
                     }
@@ -262,8 +319,10 @@ async fn handle_connection(
                     Some(Message::Ping { timestamp }) => {
                         let pong = Message::Pong { timestamp };
                         if let Ok(json) = serde_json::to_string(&pong) {
-                            let mut sender = ws_sender.lock().await;
-                            let _ = sender.send(WsMessage::Text(json)).await;
+                            let mut guard = ws_sender.lock().await;
+                            if let Some(sender) = guard.as_mut() {
+                                let _ = sender.send(WsMessage::Text(json)).await;
+                            }
                         }
                     }
                     Some(Message::LatencyReport { latency_ms }) => {
@@ -292,11 +351,27 @@ async fn handle_connection(
     }
 
     heartbeat_handle.abort();
+    {
+        let mut guard = ws_sender.lock().await;
+        *guard = None;
+    }
     if let Some(id) = &client_id {
         clients.write().await.remove(id);
         log::info!("Client {} removed", id);
     }
     log::info!("Connection closed for {}", addr);
+}
+
+async fn broadcast_to_all_clients(clients: &ClientInfo, msg: &Message) {
+    if let Ok(json) = serde_json::to_string(msg) {
+        let clients_map = clients.read().await;
+        for entry in clients_map.values() {
+            let mut guard = entry.ws_sender.lock().await;
+            if let Some(sender) = guard.as_mut() {
+                let _ = sender.send(WsMessage::Text(json.clone())).await;
+            }
+        }
+    }
 }
 
 async fn start_web_server(port: u16, state: Arc<AppState>) {
@@ -319,20 +394,23 @@ async fn index_page() -> axum::response::Html<&'static str> {
 
 async fn get_clients(AxumState(state): AxumState<Arc<AppState>>) -> Json<Value> {
     let clients = state.clients.read().await;
-    let list: Vec<Value> = clients.values().map(|c| {
-        json!({
-            "client_id": c.client_id,
-            "addr": c.addr.to_string(),
-            "mode": format!("{:?}", c.mode),
-            "latency_ms": (c.latency_ms * 100.0).round() / 100.0,
-            "connected_at": c.connected_at,
+    let list: Vec<Value> = clients
+        .values()
+        .map(|c| {
+            json!({
+                "client_id": c.client_id,
+                "addr": c.addr.to_string(),
+                "mode": format!("{:?}", c.mode),
+                "latency_ms": (c.latency_ms * 100.0).round() / 100.0,
+                "connected_at": c.connected_at,
+            })
         })
-    }).collect();
+        .collect();
     Json(json!({ "clients": list }))
 }
 
 async fn get_sample_rate(AxumState(state): AxumState<Arc<AppState>>) -> Json<Value> {
-    let rate = *state.sample_rate.read().await;
+    let rate = ACTUAL_SAMPLE_RATE.load(std::sync::atomic::Ordering::Relaxed);
     Json(json!({ "sample_rate": rate }))
 }
 
@@ -340,13 +418,23 @@ async fn set_sample_rate(
     AxumState(state): AxumState<Arc<AppState>>,
     Json(payload): Json<Value>,
 ) -> Json<Value> {
-    if let Some(rate) = payload.get("sample_rate").and_then(|v| v.as_u64()) {
-        let rate = rate as u32;
-        *state.sample_rate.write().await = rate;
-        ACTUAL_SAMPLE_RATE.store(rate, std::sync::atomic::Ordering::Relaxed);
-        log::info!("Sample rate changed to {}Hz", rate);
-        Json(json!({ "ok": true, "sample_rate": rate }))
-    } else {
-        Json(json!({ "ok": false, "error": "missing sample_rate" }))
+    let Some(rate) = payload.get("sample_rate").and_then(|v| v.as_u64()) else {
+        return Json(json!({ "ok": false, "error": "missing sample_rate" }));
+    };
+
+    let rate = rate as u32;
+    ACTUAL_SAMPLE_RATE.store(rate, std::sync::atomic::Ordering::Relaxed);
+    *state.sample_rate.write().await = rate;
+
+    log::info!("Sample rate changed to {}Hz, restarting capture...", rate);
+
+    if let Err(e) = restart_audio_capture(&state).await {
+        return Json(json!({ "ok": false, "error": format!("{}", e) }));
     }
+
+    let msg = Message::SampleRateChange { sample_rate: rate };
+    broadcast_to_all_clients(&state.clients, &msg).await;
+
+    log::info!("Sample rate changed to {}Hz, notified all clients", rate);
+    Json(json!({ "ok": true, "sample_rate": rate }))
 }

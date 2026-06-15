@@ -110,10 +110,15 @@ pub async fn run_client(server_host: &str, port: u16, as_mic: bool) -> Result<()
                 while let Some(msg) = ws_receiver.next().await {
                     match msg {
                         Ok(WsMessage::Text(text)) => {
-                            if let Some(Message::AudioData { data, .. }) =
-                                Message::from_json_bytes(text.as_bytes())
-                            {
-                                let _ = audio_tx.send(data).await;
+                            match Message::from_json_bytes(text.as_bytes()) {
+                                Some(Message::AudioData { data, .. }) => {
+                                    let _ = audio_tx.send(data).await;
+                                }
+                                Some(Message::SampleRateChange { sample_rate }) => {
+                                    log::info!("Server changed sample rate to {}Hz", sample_rate);
+                                }
+                                Some(Message::Pong { .. }) => {}
+                                _ => {}
                             }
                         }
                         Ok(WsMessage::Close(_)) => {
