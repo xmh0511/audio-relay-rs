@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AudioRelay</string>
+    <string name="notification_channel_id">audio_relay_service</string>
+    <string name="notification_channel_name">Audio Relay Service</string>
+    <string name="notification_title">Audio Relay</string>
+    <string name="notification_text">Streaming audio…</string>
+</resources>
