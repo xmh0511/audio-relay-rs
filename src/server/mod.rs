@@ -33,6 +33,7 @@ pub struct AppState {
     pub sample_rate: Arc<RwLock<u32>>,
     pub audio_capture: Arc<RwLock<Option<AudioCapture>>>,
     pub broadcast_tx: broadcast::Sender<Vec<u8>>,
+    pub broadcast_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     pub pending_acks: Arc<std::sync::atomic::AtomicUsize>,
     pub ack_notify: Arc<tokio::sync::Notify>,
 }
@@ -51,6 +52,7 @@ pub async fn run_server(host: &str, port: u16, web_port: u16) -> Result<()> {
         )),
         audio_capture: Arc::new(RwLock::new(None)),
         broadcast_tx: broadcast_tx.clone(),
+        broadcast_handle: Arc::new(Mutex::new(None)),
         pending_acks: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         ack_notify: Arc::new(tokio::sync::Notify::new()),
     });
@@ -115,11 +117,12 @@ async fn start_audio_capture(state: Arc<AppState>) {
             *state.audio_capture.write().await = Some(capture);
             log::info!("System audio capture started");
 
-            tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 while let Some(data) = audio_rx.recv().await {
                     let _ = broadcast_tx.send(data);
                 }
             });
+            *state.broadcast_handle.lock().await = Some(handle);
         }
         Err(e) => {
             log::error!("Failed to start audio capture: {}", e);
@@ -132,6 +135,10 @@ async fn restart_audio_capture(state: &AppState, rate: u32) -> Result<()> {
     if let Some(mut c) = old {
         c.stop();
         c.wait_stopped().await;
+    }
+
+    if let Some(handle) = state.broadcast_handle.lock().await.take() {
+        handle.abort();
     }
 
     let client_count = {
@@ -184,11 +191,12 @@ async fn restart_audio_capture(state: &AppState, rate: u32) -> Result<()> {
             *state.audio_capture.write().await = Some(capture);
             log::info!("Audio capture restarted at {}Hz", rate);
 
-            tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 while let Some(data) = audio_rx.recv().await {
                     let _ = broadcast_tx.send(data);
                 }
             });
+            *state.broadcast_handle.lock().await = Some(handle);
             Ok(())
         }
         Err(e) => {
