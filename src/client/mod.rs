@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
 use tungstenite::Message as WsMessage;
@@ -105,7 +106,9 @@ pub async fn run_client(server_host: &str, port: u16, as_mic: bool) -> Result<()
                 .context("Failed to initialize audio playback")?;
 
             let audio_tx = audio_tx;
+            let ws_sender = Arc::new(tokio::sync::Mutex::new(ws_sender));
 
+            let recv_sender = ws_sender.clone();
             let recv_handle = tokio::spawn(async move {
                 while let Some(msg) = ws_receiver.next().await {
                     match msg {
@@ -116,6 +119,11 @@ pub async fn run_client(server_host: &str, port: u16, as_mic: bool) -> Result<()
                                 }
                                 Some(Message::SampleRateChange { sample_rate }) => {
                                     log::info!("Server changed sample rate to {}Hz", sample_rate);
+                                    let ack = Message::SampleRateChangeAck { sample_rate };
+                                    if let Ok(json) = serde_json::to_string(&ack) {
+                                        let mut sender = recv_sender.lock().await;
+                                        let _ = sender.send(WsMessage::Text(json)).await;
+                                    }
                                 }
                                 Some(Message::Pong { .. }) => {}
                                 _ => {}

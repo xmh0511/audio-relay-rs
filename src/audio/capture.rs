@@ -1,9 +1,32 @@
 use anyhow::Result;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+
+struct StopNotifier(Option<oneshot::Sender<()>>);
+
+impl StopNotifier {
+    fn new(tx: oneshot::Sender<()>) -> Self {
+        Self(Some(tx))
+    }
+
+    fn done(mut self) {
+        if let Some(tx) = self.0.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+impl Drop for StopNotifier {
+    fn drop(&mut self) {
+        if let Some(tx) = self.0.take() {
+            let _ = tx.send(());
+        }
+    }
+}
 
 pub struct AudioCapture {
     stop_flag: Arc<std::sync::atomic::AtomicBool>,
+    stopped_rx: Option<oneshot::Receiver<()>>,
     _handle: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -11,18 +34,20 @@ impl AudioCapture {
     pub fn new(tx: mpsc::Sender<Vec<u8>>) -> Result<Self> {
         let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = stop_flag.clone();
+        let (stopped_tx, stopped_rx) = oneshot::channel::<()>();
 
         let handle = std::thread::Builder::new()
             .name("audio-capture".to_string())
             .spawn(move || {
                 #[cfg(target_os = "windows")]
-                capture_windows(tx, flag);
+                capture_windows(tx, flag, stopped_tx);
                 #[cfg(not(target_os = "windows"))]
-                capture_cpal(tx, flag);
+                capture_cpal(tx, flag, stopped_tx);
             })?;
 
         Ok(Self {
             stop_flag,
+            stopped_rx: Some(stopped_rx),
             _handle: Some(handle),
         })
     }
@@ -31,12 +56,24 @@ impl AudioCapture {
         self.stop_flag
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
+
+    pub async fn wait_stopped(&mut self) {
+        if let Some(rx) = self.stopped_rx.take() {
+            let _ = rx.await;
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
-fn capture_windows(tx: mpsc::Sender<Vec<u8>>, stop_flag: Arc<std::sync::atomic::AtomicBool>) {
+fn capture_windows(
+    tx: mpsc::Sender<Vec<u8>>,
+    stop_flag: Arc<std::sync::atomic::AtomicBool>,
+    stopped_tx: oneshot::Sender<()>,
+) {
     use std::collections::VecDeque;
     use wasapi::*;
+
+    let notifier = StopNotifier::new(stopped_tx);
 
     let _ = initialize_mta();
 
@@ -177,6 +214,9 @@ fn capture_windows(tx: mpsc::Sender<Vec<u8>>, stop_flag: Arc<std::sync::atomic::
 
         h_event.wait_for_event(10000).ok();
     }
+
+    log::info!("Loopback capture stopped");
+    notifier.done();
 }
 
 #[cfg(target_os = "windows")]
@@ -231,8 +271,14 @@ fn convert_to_i16_pcm(raw: &[u8], bits_per_sample: usize, channels: usize) -> Ve
 }
 
 #[cfg(not(target_os = "windows"))]
-fn capture_cpal(tx: mpsc::Sender<Vec<u8>>, _stop_flag: Arc<std::sync::atomic::AtomicBool>) {
+fn capture_cpal(
+    tx: mpsc::Sender<Vec<u8>>,
+    stop_flag: Arc<std::sync::atomic::AtomicBool>,
+    stopped_tx: oneshot::Sender<()>,
+) {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+    let notifier = StopNotifier::new(stopped_tx);
 
     let host = cpal::default_host();
 
@@ -295,14 +341,14 @@ fn capture_cpal(tx: mpsc::Sender<Vec<u8>>, _stop_flag: Arc<std::sync::atomic::At
 
     log::info!("Audio capture started: {}Hz, {} ch", sample_rate, channels);
 
-    loop {
-        if _stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
-            log::info!("Capture stopping");
-            drop(stream);
-            break;
-        }
+    while !stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+
+    log::info!("Capture stopping");
+    drop(stream);
+    log::info!("Capture stopped");
+    notifier.done();
 }
 
 #[cfg(not(target_os = "windows"))]

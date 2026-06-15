@@ -197,6 +197,13 @@ class AudioRelayService : Service() {
                 val newRate = change.optInt("sample_rate", SAMPLE_RATE)
                 Log.d(TAG, "SampleRateChange: ${newRate}Hz, rebuilding AudioTrack")
                 initAudioTrack(newRate)
+                val ack = JSONObject().apply {
+                    put("SampleRateChangeAck", JSONObject().apply {
+                        put("sample_rate", newRate)
+                    })
+                }
+                webSocket?.send(ack.toString())
+                Log.d(TAG, "Sent SampleRateChangeAck for ${newRate}Hz")
             }
         }
     }

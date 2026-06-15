@@ -36,6 +36,9 @@ pub enum Message {
     SampleRateChange {
         sample_rate: u32,
     },
+    SampleRateChangeAck {
+        sample_rate: u32,
+    },
     StreamStart {
         direction: StreamDirection,
     },
