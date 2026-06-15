@@ -38,19 +38,22 @@ import androidx.lifecycle.LifecycleEventObserver
 
 class MainActivity : ComponentActivity() {
 
-    private var service: AudioRelayService? = null
-    private var bound = false
+    private var boundService: AudioRelayService? = null
+    private val isBound = mutableStateOf(false)
+    private val serviceRef = mutableStateOf<AudioRelayService?>(null)
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             val localBinder = binder as AudioRelayService.LocalBinder
-            service = localBinder.getService()
-            bound = true
+            boundService = localBinder.getService()
+            serviceRef.value = boundService
+            isBound.value = true
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
-            service = null
-            bound = false
+            boundService = null
+            serviceRef.value = null
+            isBound.value = false
         }
     }
 
@@ -70,8 +73,8 @@ class MainActivity : ComponentActivity() {
         setContent {
             AudioRelayTheme {
                 AudioRelayScreen(
-                    service = service,
-                    isBound = bound
+                    service = serviceRef.value,
+                    isBound = isBound.value
                 )
             }
         }
@@ -86,9 +89,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
-        if (bound) {
+        if (isBound.value) {
             unbindService(connection)
-            bound = false
+            isBound.value = false
         }
     }
 
