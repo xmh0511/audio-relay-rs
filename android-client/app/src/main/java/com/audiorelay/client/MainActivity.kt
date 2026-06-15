@@ -1,14 +1,10 @@
 package com.audiorelay.client
 
 import android.Manifest
-import android.content.ComponentName
-import android.content.Context
 import android.content.Intent
-import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import android.os.IBinder
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -28,41 +24,19 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
 
 class MainActivity : ComponentActivity() {
-
-    private var boundService: AudioRelayService? = null
-    private val isBound = mutableStateOf(false)
-    private val serviceRef = mutableStateOf<AudioRelayService?>(null)
-
-    private val connection = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
-            val localBinder = binder as AudioRelayService.LocalBinder
-            boundService = localBinder.getService()
-            serviceRef.value = boundService
-            isBound.value = true
-        }
-
-        override fun onServiceDisconnected(name: ComponentName?) {
-            boundService = null
-            serviceRef.value = null
-            isBound.value = false
-        }
-    }
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         val allGranted = permissions.values.all { it }
         if (!allGranted) {
-            Toast.makeText(this, "Some permissions denied, notifications may not work", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Some permissions denied", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -72,26 +46,8 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             AudioRelayTheme {
-                AudioRelayScreen(
-                    service = serviceRef.value,
-                    isBound = isBound.value
-                )
+                AudioRelayScreen()
             }
-        }
-    }
-
-    override fun onStart() {
-        super.onStart()
-        Intent(this, AudioRelayService::class.java).also { intent ->
-            bindService(intent, connection, Context.BIND_AUTO_CREATE)
-        }
-    }
-
-    override fun onStop() {
-        super.onStop()
-        if (isBound.value) {
-            unbindService(connection)
-            isBound.value = false
         }
     }
 
@@ -112,25 +68,23 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AudioRelayScreen(
-    service: AudioRelayService?,
-    isBound: Boolean
-) {
+fun AudioRelayScreen() {
     var serverHost by remember { mutableStateOf("192.168.1.100") }
     var serverPort by remember { mutableStateOf("8080") }
-    var isConnected by remember { mutableStateOf(false) }
+    var isPlaying by remember { mutableStateOf(false) }
     var audioLevel by remember { mutableFloatStateOf(0f) }
     val context = LocalContext.current
 
-    LaunchedEffect(service, isBound) {
-        if (isBound && service != null) {
-            service.onStateChanged = { state ->
-                isConnected = state == AudioRelayService.ServiceState.STREAMING
+    LaunchedEffect(isPlaying) {
+        if (isPlaying) {
+            while (isPlaying) {
+                val svc = AudioRelayService.instance
+                if (svc != null) {
+                    svc.onAudioLevel = { audioLevel = it }
+                    isPlaying = svc.isConnected()
+                }
+                kotlinx.coroutines.delay(200)
             }
-            service.onAudioLevel = { level ->
-                audioLevel = level
-            }
-            isConnected = service.isConnected()
         }
     }
 
@@ -139,18 +93,12 @@ fun AudioRelayScreen(
             .fillMaxSize()
             .background(
                 Brush.verticalGradient(
-                    colors = listOf(
-                        Color(0xFF1A1A2E),
-                        Color(0xFF16213E),
-                        Color(0xFF0F3460)
-                    )
+                    colors = listOf(Color(0xFF1A1A2E), Color(0xFF16213E), Color(0xFF0F3460))
                 )
             )
     ) {
         Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(24.dp),
+            modifier = Modifier.fillMaxSize().padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
@@ -163,27 +111,15 @@ fun AudioRelayScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            Text(
-                text = "Audio Relay",
-                fontSize = 32.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color.White
-            )
+            Text("Audio Relay", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Color.White)
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            Text(
-                text = "Stream PC audio to your phone",
-                fontSize = 14.sp,
-                color = Color.White.copy(alpha = 0.6f)
-            )
+            Text("Stream PC audio to your phone", fontSize = 14.sp, color = Color.White.copy(alpha = 0.6f))
 
             Spacer(modifier = Modifier.height(40.dp))
 
-            AudioVisualizer(
-                level = if (isConnected) audioLevel else 0f,
-                isConnected = isConnected
-            )
+            AudioVisualizer(level = if (isPlaying) audioLevel else 0f, isConnected = isPlaying)
 
             Spacer(modifier = Modifier.height(40.dp))
 
@@ -193,7 +129,7 @@ fun AudioRelayScreen(
                 label = { Text("Server IP") },
                 leadingIcon = { Icon(Icons.Default.Dns, contentDescription = null) },
                 modifier = Modifier.fillMaxWidth(),
-                enabled = !isConnected,
+                enabled = !isPlaying,
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedTextColor = Color.White,
                     unfocusedTextColor = Color.White,
@@ -214,7 +150,7 @@ fun AudioRelayScreen(
                 label = { Text("Port") },
                 leadingIcon = { Icon(Icons.Default.Lan, contentDescription = null) },
                 modifier = Modifier.fillMaxWidth(),
-                enabled = !isConnected,
+                enabled = !isPlaying,
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedTextColor = Color.White,
                     unfocusedTextColor = Color.White,
@@ -231,25 +167,16 @@ fun AudioRelayScreen(
 
             Button(
                 onClick = {
-                    if (!isBound || service == null) {
-                        Toast.makeText(
-                            context,
-                            "Service not bound, retrying…",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                        return@Button
-                    }
-
-                    if (isConnected) {
-                        service.stop()
-                        isConnected = false
+                    if (isPlaying) {
+                        val intent = Intent(context, AudioRelayService::class.java).apply {
+                            action = AudioRelayService.ACTION_STOP
+                        }
+                        context.startService(intent)
+                        isPlaying = false
                     } else {
                         val port = serverPort.toIntOrNull() ?: 8080
-                        val intent = Intent(
-                            context,
-                            AudioRelayService::class.java
-                        ).apply {
-                            action = "com.audiorelay.START"
+                        val intent = Intent(context, AudioRelayService::class.java).apply {
+                            action = AudioRelayService.ACTION_START
                             putExtra("host", serverHost)
                             putExtra("port", port)
                         }
@@ -258,29 +185,24 @@ fun AudioRelayScreen(
                         } else {
                             context.startService(intent)
                         }
-                        Toast.makeText(
-                            context,
-                            "Connecting to $serverHost:$port",
-                            Toast.LENGTH_SHORT
-                        ).show()
+                        isPlaying = true
+                        Toast.makeText(context, "Connecting to $serverHost:$port", Toast.LENGTH_SHORT).show()
                     }
                 },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(56.dp),
+                modifier = Modifier.fillMaxWidth().height(56.dp),
                 shape = RoundedCornerShape(16.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = if (isConnected) Color(0xFFE94560) else Color(0xFF533483)
+                    containerColor = if (isPlaying) Color(0xFFE94560) else Color(0xFF533483)
                 )
             ) {
                 Icon(
-                    imageVector = if (isConnected) Icons.Default.Stop else Icons.Default.PlayArrow,
+                    imageVector = if (isPlaying) Icons.Default.Stop else Icons.Default.PlayArrow,
                     contentDescription = null,
                     modifier = Modifier.size(24.dp)
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = if (isConnected) "Disconnect" else "Connect",
+                    text = if (isPlaying) "Disconnect" else "Connect",
                     fontSize = 18.sp,
                     fontWeight = FontWeight.SemiBold
                 )
@@ -288,19 +210,16 @@ fun AudioRelayScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center
-            ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     modifier = Modifier
                         .size(10.dp)
                         .clip(CircleShape)
-                        .background(if (isConnected) Color(0xFF4CAF50) else Color(0xFFE94560))
+                        .background(if (isPlaying) Color(0xFF4CAF50) else Color(0xFFE94560))
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = if (isConnected) "Streaming" else "Disconnected",
+                    text = if (isPlaying) "Streaming" else "Disconnected",
                     color = Color.White.copy(alpha = 0.7f),
                     fontSize = 14.sp
                 )
@@ -325,14 +244,12 @@ fun AudioVisualizer(level: Float, isConnected: Boolean) {
     val displayLevel = if (isConnected) (level * animatedLevel).coerceIn(0.05f, 1f) else 0f
 
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(80.dp),
+        modifier = Modifier.fillMaxWidth().height(80.dp),
         horizontalArrangement = Arrangement.SpaceEvenly,
         verticalAlignment = Alignment.CenterVertically
     ) {
         repeat(12) { index ->
-            val baseHeight = when {
+            val barHeight = when {
                 !isConnected -> 4.dp
                 else -> {
                     val offset = (index % 4) * 0.15f
@@ -341,15 +258,15 @@ fun AudioVisualizer(level: Float, isConnected: Boolean) {
             }
             val barColor = when {
                 !isConnected -> Color.White.copy(alpha = 0.1f)
-                baseHeight > 60.dp -> Color(0xFFE94560)
-                baseHeight > 30.dp -> Color(0xFF533483)
+                barHeight > 60.dp -> Color(0xFFE94560)
+                barHeight > 30.dp -> Color(0xFF533483)
                 else -> Color(0xFF0F3460)
             }
 
             Box(
                 modifier = Modifier
                     .width(8.dp)
-                    .height(baseHeight)
+                    .height(barHeight)
                     .clip(RoundedCornerShape(4.dp))
                     .background(barColor)
             )

@@ -7,45 +7,34 @@ import android.content.Intent
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
-import android.os.Binder
 import android.os.Build
-import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
 import okhttp3.*
-import java.io.IOException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
 import org.json.JSONArray
 import org.json.JSONObject
 
 class AudioRelayService : Service() {
 
-    private val binder = LocalBinder()
     private var audioTrack: AudioTrack? = null
     private var webSocket: WebSocket? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val isRunning = AtomicBoolean(false)
-    private val sequenceCounter = AtomicLong(0)
 
     var onStateChanged: ((ServiceState) -> Unit)? = null
     var onAudioLevel: ((Float) -> Unit)? = null
 
     private var currentState = ServiceState.DISCONNECTED
 
-    inner class LocalBinder : Binder() {
-        fun getService(): AudioRelayService = this@AudioRelayService
-    }
-
-    override fun onBind(intent: Intent?): IBinder = binder
-
     override fun onCreate() {
         super.onCreate()
+        instance = this
         Log.d(TAG, "Service created")
     }
 
@@ -302,6 +291,7 @@ class AudioRelayService : Service() {
     }
 
     override fun onDestroy() {
+        instance = null
         stop()
         super.onDestroy()
     }
@@ -313,11 +303,15 @@ class AudioRelayService : Service() {
     companion object {
         private const val TAG = "AudioRelayService"
         private const val NOTIFICATION_ID = 1001
-        private const val ACTION_START = "com.audiorelay.START"
-        private const val ACTION_STOP = "com.audiorelay.STOP"
+        const val ACTION_START = "com.audiorelay.START"
+        const val ACTION_STOP = "com.audiorelay.STOP"
         private const val EXTRA_HOST = "host"
         private const val EXTRA_PORT = "port"
         private const val SAMPLE_RATE = 44100
         private const val CHANNELS = 1
+
+        @Volatile
+        var instance: AudioRelayService? = null
+            private set
     }
 }
