@@ -142,7 +142,7 @@ async fn restart_audio_capture(state: &AppState, rate: u32) -> Result<()> {
     if client_count > 0 {
         state
             .pending_acks
-            .store(client_count, std::sync::atomic::Ordering::SeqCst);
+            .store(client_count, std::sync::atomic::Ordering::Relaxed);
 
         let msg = Message::SampleRateChange { sample_rate: rate };
         broadcast_to_all_clients(&state.clients, &msg).await;
@@ -157,7 +157,7 @@ async fn restart_audio_capture(state: &AppState, rate: u32) -> Result<()> {
         loop {
             let remaining = state
                 .pending_acks
-                .load(std::sync::atomic::Ordering::SeqCst);
+                .load(std::sync::atomic::Ordering::Relaxed);
             if remaining == 0 {
                 log::info!("All clients acknowledged sample rate change");
                 break;
@@ -388,7 +388,7 @@ async fn handle_connection(
                         );
                         let remaining = state
                             .pending_acks
-                            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                         if remaining <= 1 {
                             state.ack_notify.notify_one();
                         }
