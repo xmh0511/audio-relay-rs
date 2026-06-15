@@ -4,6 +4,10 @@ import android.app.Notification
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
@@ -24,6 +28,7 @@ class AudioRelayService : Service() {
     private var audioTrack: AudioTrack? = null
     private var webSocket: WebSocket? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val isRunning = AtomicBoolean(false)
@@ -71,10 +76,12 @@ class AudioRelayService : Service() {
         connectPort = port
         isRunning.set(true)
         acquireWakeLock()
+        registerNetworkCallback()
 
         val client = OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(0, TimeUnit.SECONDS)
+            .pingInterval(10, TimeUnit.SECONDS)
             .build()
 
         val request = Request.Builder()
@@ -238,8 +245,10 @@ class AudioRelayService : Service() {
     }
 
     private fun handleDisconnect() {
-        isRunning.set(false)
+        if (!isRunning.compareAndSet(true, false)) return
+
         pingJob?.cancel()
+        webSocket = null
         audioTrack?.release()
         audioTrack = null
 
@@ -265,6 +274,7 @@ class AudioRelayService : Service() {
     fun stop() {
         shouldReconnect = false
         pingJob?.cancel()
+        unregisterNetworkCallback()
         webSocket?.close(1000, "Client disconnect")
         webSocket = null
         isRunning.set(false)
@@ -275,6 +285,43 @@ class AudioRelayService : Service() {
     }
 
     fun isConnected(): Boolean = isRunning.get()
+
+    private fun registerNetworkCallback() {
+        val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+        val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+
+        networkCallback = object : ConnectivityManager.NetworkCallback() {
+            override fun onLost(network: Network) {
+                Log.w(TAG, "Network lost, will reconnect when available")
+            }
+
+            override fun onAvailable(network: Network) {
+                Log.d(TAG, "Network available")
+                if (shouldReconnect && !isRunning.get()) {
+                    scope.launch {
+                        delay(1000)
+                        connect(connectHost, connectPort)
+                    }
+                }
+            }
+        }
+
+        cm.registerNetworkCallback(request, networkCallback!!)
+    }
+
+    private fun unregisterNetworkCallback() {
+        networkCallback?.let {
+            val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+            try {
+                cm.unregisterNetworkCallback(it)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to unregister network callback", e)
+            }
+        }
+        networkCallback = null
+    }
 
     private fun acquireWakeLock() {
         val pm = getSystemService(POWER_SERVICE) as PowerManager
@@ -337,6 +384,7 @@ class AudioRelayService : Service() {
     override fun onDestroy() {
         instance = null
         shouldReconnect = false
+        unregisterNetworkCallback()
         stop()
         super.onDestroy()
     }

@@ -2,9 +2,11 @@ package com.audiorelay.client
 
 import android.Manifest
 import android.content.Intent
-import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -38,6 +40,7 @@ class MainActivity : ComponentActivity() {
         if (!allGranted) {
             Toast.makeText(this, "Some permissions denied", Toast.LENGTH_SHORT).show()
         }
+        requestBatteryOptimization()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -62,6 +65,22 @@ class MainActivity : ComponentActivity() {
         }
         if (permissions.isNotEmpty()) {
             permissionLauncher.launch(permissions.toTypedArray())
+        } else {
+            requestBatteryOptimization()
+        }
+    }
+
+    private fun requestBatteryOptimization() {
+        val pm = getSystemService(POWER_SERVICE) as PowerManager
+        if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+            try {
+                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                    data = Uri.parse("package:$packageName")
+                }
+                startActivity(intent)
+            } catch (e: Exception) {
+                // Some devices don't support this intent
+            }
         }
     }
 }
