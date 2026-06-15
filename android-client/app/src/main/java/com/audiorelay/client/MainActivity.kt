@@ -95,16 +95,16 @@ fun AudioRelayScreen() {
     var audioLevel by remember { mutableFloatStateOf(0f) }
     val context = LocalContext.current
 
-    LaunchedEffect(isPlaying) {
-        if (isPlaying) {
-            while (isPlaying) {
-                val svc = AudioRelayService.instance
-                if (svc != null) {
-                    svc.onAudioLevel = { audioLevel = it }
-                    isPlaying = svc.isConnected()
-                }
-                kotlinx.coroutines.delay(200)
+    LaunchedEffect(Unit) {
+        while (true) {
+            val svc = AudioRelayService.instance
+            if (svc != null) {
+                svc.onAudioLevel = { audioLevel = it }
+                isPlaying = svc.isConnected()
+            } else {
+                isPlaying = false
             }
+            kotlinx.coroutines.delay(500)
         }
     }
 
