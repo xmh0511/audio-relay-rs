@@ -52,7 +52,7 @@ pub async fn run_client(server_host: &str, port: u16, as_mic: bool) -> Result<()
     match mode {
         StreamMode::Microphone => {
             log::info!("Starting in microphone mode");
-            let (tx, rx) = mpsc::channel::<Vec<u8>>(50);
+            let (tx, mut rx) = mpsc::channel::<(u32, Vec<u8>)>(50);
 
             let _capture = AudioCapture::new(tx)
                 .context("Failed to initialize audio capture")?;
@@ -60,20 +60,7 @@ pub async fn run_client(server_host: &str, port: u16, as_mic: bool) -> Result<()
             let mut audio_seq: u64 = 0;
 
             let send_handle = tokio::spawn(async move {
-                let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(20));
-                loop {
-                    tokio::select! {
-                        _ = interval.tick() => {
-                            // Periodic ping
-                        }
-                        _ = async {} => {}
-                    }
-                }
-            });
-
-            let mut audio_rx = rx;
-            let ws_send = tokio::spawn(async move {
-                while let Some(data) = audio_rx.recv().await {
+                while let Some((_rate, data)) = rx.recv().await {
                     let msg = Message::AudioData {
                         sequence: audio_seq,
                         timestamp: crate::protocol::timestamp_ms(),
@@ -97,7 +84,6 @@ pub async fn run_client(server_host: &str, port: u16, as_mic: bool) -> Result<()
             }
 
             send_handle.abort();
-            ws_send.abort();
         }
         StreamMode::Speaker => {
             log::info!("Starting in speaker mode");

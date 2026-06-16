@@ -103,7 +103,7 @@ pub async fn run_server(host: &str, port: u16, web_port: u16) -> Result<()> {
 }
 
 async fn start_audio_capture(state: Arc<AppState>) {
-    let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(200);
+    let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<(u32, Vec<u8>)>(200);
     let broadcast_tx = state.broadcast_tx.clone();
 
     match AudioCapture::new(audio_tx) {
@@ -112,9 +112,8 @@ async fn start_audio_capture(state: Arc<AppState>) {
             log::info!("System audio capture started");
 
             let handle = tokio::spawn(async move {
-                let rate = ACTUAL_SAMPLE_RATE.load(std::sync::atomic::Ordering::Relaxed);
-                while let Some(data) = audio_rx.recv().await {
-                    let _ = broadcast_tx.send((rate, data));
+                while let Some(item) = audio_rx.recv().await {
+                    let _ = broadcast_tx.send(item);
                 }
             });
             *state.broadcast_handle.lock().await = Some(handle);
@@ -138,19 +137,17 @@ async fn restart_audio_capture(state: &AppState, rate: u32) -> Result<()> {
         handle.abort();
     }
 
-    ACTUAL_SAMPLE_RATE.store(rate, std::sync::atomic::Ordering::Relaxed);
-
-    let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(200);
+    let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<(u32, Vec<u8>)>(200);
     let broadcast_tx = state.broadcast_tx.clone();
 
     match AudioCapture::new(audio_tx) {
         Ok(capture) => {
             *state.audio_capture.write().await = Some(capture);
-            log::info!("Audio capture restarted at {}Hz", rate);
+            log::info!("Audio capture restarted");
 
             let handle = tokio::spawn(async move {
-                while let Some(data) = audio_rx.recv().await {
-                    let _ = broadcast_tx.send((rate, data));
+                while let Some(item) = audio_rx.recv().await {
+                    let _ = broadcast_tx.send(item);
                 }
             });
             *state.broadcast_handle.lock().await = Some(handle);

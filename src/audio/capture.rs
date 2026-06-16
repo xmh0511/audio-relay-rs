@@ -31,7 +31,7 @@ pub struct AudioCapture {
 }
 
 impl AudioCapture {
-    pub fn new(tx: mpsc::Sender<Vec<u8>>) -> Result<Self> {
+    pub fn new(tx: mpsc::Sender<(u32, Vec<u8>)>) -> Result<Self> {
         let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = stop_flag.clone();
         let (stopped_tx, stopped_rx) = oneshot::channel::<()>();
@@ -66,7 +66,7 @@ impl AudioCapture {
 
 #[cfg(target_os = "windows")]
 fn capture_windows(
-    tx: mpsc::Sender<Vec<u8>>,
+    tx: mpsc::Sender<(u32, Vec<u8>)>,
     stop_flag: Arc<std::sync::atomic::AtomicBool>,
     stopped_tx: oneshot::Sender<()>,
 ) {
@@ -207,7 +207,7 @@ fn capture_windows(
 
             let pcm_chunk = convert_to_i16_pcm(&raw_chunk, bits_per_sample, device_channels);
 
-            if tx.try_send(pcm_chunk).is_err() {
+            if tx.try_send((device_sample_rate, pcm_chunk)).is_err() {
                 log::warn!("Audio channel full, dropping frame");
             }
         }
@@ -272,7 +272,7 @@ fn convert_to_i16_pcm(raw: &[u8], bits_per_sample: usize, channels: usize) -> Ve
 
 #[cfg(not(target_os = "windows"))]
 fn capture_cpal(
-    tx: mpsc::Sender<Vec<u8>>,
+    tx: mpsc::Sender<(u32, Vec<u8>)>,
     stop_flag: Arc<std::sync::atomic::AtomicBool>,
     stopped_tx: oneshot::Sender<()>,
 ) {
@@ -318,7 +318,7 @@ fn capture_cpal(
         &config,
         move |data: &[f32], _: &cpal::InputCallbackInfo| {
             let pcm_data = float_to_i16_bytes(data);
-            if tx.try_send(pcm_data).is_err() {
+            if tx.try_send((sample_rate, pcm_data)).is_err() {
                 log::warn!("Audio channel full, dropping frame");
             }
         },
