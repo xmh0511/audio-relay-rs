@@ -8,12 +8,11 @@
 - **手机 → PC**：将手机麦克风音频传输到 PC 播放（Microphone 模式）
 - **前台服务**：Android 端使用 Foreground Service + Wake Lock，熄屏或切换后台后持续运行
 - **跨平台服务端**：支持 Windows / Linux / macOS
+- **Web 管理界面**：通过 HTTP API 查看客户端状态、调整采样率
 
 ## 快速开始
 
 ### 1. 启动服务端（PC）
-
-从 [Releases](https://github.com/yourname/audio-relay-rs/releases) 下载对应平台的可执行文件，或本地编译：
 
 ```bash
 # 编译
@@ -28,7 +27,13 @@ cargo run --release -- server -p 9090
 
 ### 2. 安装 Android 客户端
 
-从 [Releases](https://github.com/yourname/audio-relay-rs/releases) 下载 `app-release.apk` 安装到手机。
+编译 Android 客户端：
+
+```bash
+cd android-client
+./gradlew assembleRelease
+# 输出: app/build/outputs/apk/release/app-release.apk
+```
 
 > 首次安装需允许「通知权限」和「忽略电池优化」。
 
@@ -47,8 +52,9 @@ cargo run --release -- server -p 9090
 audio-relay-rs server [OPTIONS]
 
 Options:
-  -h, --host <HOST>    监听地址 [default: 0.0.0.0]
-  -p, --port <PORT>    监听端口 [default: 8080]
+  -h, --host <HOST>      监听地址 [default: 0.0.0.0]
+  -p, --port <PORT>      WebSocket 端口 [default: 8080]
+      --web-port <PORT>  Web 管理端口 [default: 8081]
 ```
 
 ### Client（测试用，PC 模拟客户端）
@@ -57,38 +63,32 @@ Options:
 audio-relay-rs client [OPTIONS]
 
 Options:
-  -s, --server <SERVER>    服务端地址
-  -p, --port <PORT>       服务端端口 [default: 8080]
-  -m, --mode <MODE>       模式: speaker / mic [default: speaker]
+  -s, --server <SERVER>  服务端地址
+  -p, --port <PORT>      服务端端口 [default: 8080]
+  -m, --mode <MODE>      模式: speaker / mic [default: speaker]
 ```
 
 ## 项目结构
 
 ```
 audio-relay-rs/
-├── Cargo.toml                    # Rust 项目配置
+├── Cargo.toml
+├── instruction.md              # 实现细节与设计文档
 ├── src/
-│   ├── main.rs                   # CLI 入口
-│   ├── protocol/mod.rs           # WebSocket 通信协议
+│   ├── main.rs                 # CLI 入口
+│   ├── protocol/mod.rs         # 通信协议（JSON 控制帧 + 二进制音频帧）
 │   ├── audio/
-│   │   ├── capture.rs            # 麦克风采集 (cpal)
-│   │   ├── playback.rs           # 扬声器播放 (cpal)
-│   │   └── resampler.rs          # 采样率转换
-│   ├── server/mod.rs             # WebSocket 服务端
-│   ├── client/mod.rs             # WebSocket 客户端
-│   └── utils/mod.rs              # 工具函数
-├── android-client/               # Android 客户端
-│   ├── app/build.gradle.kts
-│   ├── app/src/main/
-│   │   ├── AndroidManifest.xml
-│   │   └── java/com/audiorelay/client/
-│   │       ├── AudioRelayApp.kt
-│   │       ├── AudioRelayService.kt   # 前台服务 + AudioTrack
-│   │       └── MainActivity.kt        # Jetpack Compose UI
-│   ├── settings.gradle.kts
-│   └── build.gradle.kts
+│   │   ├── capture.rs          # 音频采集（Windows WASAPI / 跨平台 cpal）
+│   │   ├── playback.rs         # 音频播放（cpal + crossbeam-channel）
+│   │   └── resampler.rs        # 采样率转换（rubato SincFixedIn）
+│   ├── server/mod.rs           # WebSocket 服务端 + Web API
+│   └── client/mod.rs           # WebSocket 客户端（PC 测试用）
+├── android-client/             # Android 客户端（Kotlin）
+│   └── app/src/main/java/com/audiorelay/client/
+│       ├── AudioRelayService.kt  # 前台服务 + WebSocket + AudioTrack
+│       └── MainActivity.kt       # Jetpack Compose UI
 └── .github/workflows/
-    └── build.yml                 # CI/CD 自动构建
+    └── build.yml               # CI/CD 自动构建
 ```
 
 ## 技术栈
@@ -96,13 +96,17 @@ audio-relay-rs/
 | 组件 | 技术 |
 |------|------|
 | 服务端 | Rust + tokio + tungstenite + cpal |
+| Windows 音频采集 | WASAPI (wasapi crate) |
+| 跨平台音频采集/播放 | cpal |
+| 重采样 | rubato (SincFixedIn) |
+| 播放回调通道 | crossbeam-channel |
 | Android 客户端 | Kotlin + Jetpack Compose + OkHttp + AudioTrack |
-| 通信协议 | WebSocket (JSON) |
+| 通信协议 | WebSocket（JSON 控制帧 + 二进制音频帧） |
 | 音频格式 | PCM 16-bit, 44100Hz, Mono |
 
 ## 协议说明
 
-服务端与客户端通过 WebSocket 交换 JSON 消息：
+### 控制消息（JSON 文本帧）
 
 ```json
 // 客户端 → 服务端：握手
@@ -111,12 +115,21 @@ audio-relay-rs/
 // 服务端 → 客户端：握手确认
 {"HelloAck": {"session_id": "uuid", "sample_rate": 44100, "channels": 1}}
 
-// 音频数据（PCM 字节数组）
-{"AudioData": {"sequence": 0, "data": [72, 101, 108, 108, 111, ...]}}
-
 // 心跳
 {"Ping": {"timestamp": 1700000000000}}
 {"Pong": {"timestamp": 1700000000000}}
+```
+
+### 音频数据（二进制帧）
+
+音频数据使用 WebSocket 二进制帧传输，避免 JSON 编码开销：
+
+```
+Offset  Size   Field
+0       8      sequence (u64 LE)      帧序号
+8       8      timestamp (u64 LE)     时间戳（毫秒）
+16      4      sample_rate (u32 LE)   采样率
+20      N      pcm_data (raw bytes)   PCM 16-bit LE 数据
 ```
 
 ## 构建
@@ -139,12 +152,7 @@ cd android-client
 
 ### 自动构建
 
-推送到 GitHub 后，Actions 会自动构建所有平台的产物：
-
-- Windows: `audio-relay-rs-x86_64-pc-windows-msvc.zip`
-- Linux: `audio-relay-rs-x86_64-unknown-linux-gnu.tar.gz`
-- macOS: `audio-relay-rs-x86_64-apple-darwin.tar.gz`
-- Android: `app-debug.apk`
+推送到 GitHub 后，Actions 会自动构建所有平台的产物。
 
 ## 常见问题
 
@@ -155,7 +163,7 @@ cd android-client
 
 **Q: 音频有延迟？**
 - 默认使用 44100Hz 采样率，局域网延迟通常 < 50ms
-- 可尝试降低采样率（需同步修改两端）
+- 可通过 Web API 调整采样率
 
 **Q: Android 后台被杀死？**
 - 确保 App 有通知权限

@@ -226,6 +226,8 @@ fn capture_windows(
             let send_rate;
 
             if bits_per_sample == 16 && device_channels == 1 {
+                // Safety: WASAPI PCM data is little-endian (Windows only runs on LE architectures).
+                // i16 on x86/x64 is also LE, so the memory layout matches and reinterpret is valid.
                 let i16_slice = unsafe {
                     std::slice::from_raw_parts(raw_chunk.as_ptr() as *const i16, bytes_to_send / 2)
                 };
@@ -252,6 +254,7 @@ fn capture_windows(
                 }
             } else if bits_per_sample == 16 && device_channels == 2 {
                 let sample_count = bytes_to_send / 2;
+                // Safety: same as above — WASAPI 16-bit PCM is LE, matches i16 layout on Windows.
                 let i16_slice = unsafe {
                     std::slice::from_raw_parts(raw_chunk.as_ptr() as *const i16, sample_count)
                 };
