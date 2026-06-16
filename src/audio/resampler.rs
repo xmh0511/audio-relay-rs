@@ -1,10 +1,13 @@
+#[allow(dead_code)]
 pub struct Resampler {
     source_rate: u32,
     target_rate: u32,
     accumulator: f64,
 }
 
+#[allow(dead_code)]
 impl Resampler {
+    #[allow(dead_code)]
     pub fn new(source_rate: u32, target_rate: u32) -> Self {
         Self {
             source_rate,
@@ -13,6 +16,7 @@ impl Resampler {
         }
     }
 
+    #[allow(dead_code)]
     pub fn resample(&mut self, input: &[i16]) -> Vec<i16> {
         if self.source_rate == self.target_rate {
             return input.to_vec();

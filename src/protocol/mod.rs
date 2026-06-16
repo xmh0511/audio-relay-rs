@@ -57,6 +57,7 @@ pub enum StreamDirection {
 }
 
 impl Message {
+    #[allow(dead_code)]
     pub fn to_json_bytes(&self) -> Vec<u8> {
         serde_json::to_vec(self).expect("Failed to serialize message")
     }

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use axum::{extract::State as AxumState, extract::Json, routing::{get, post}, Router};
+use axum::{extract::State as AxumState, extract::Json, routing::get, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -25,6 +25,7 @@ pub struct ClientEntry {
     pub mode: StreamMode,
     pub latency_ms: f64,
     pub connected_at: u64,
+    #[allow(dead_code)]
     pub ws_sender: Arc<Mutex<Option<WsSplitSink>>>,
 }
 
@@ -126,7 +127,7 @@ async fn start_audio_capture(state: Arc<AppState>) {
     }
 }
 
-fn start_udp_broadcast(host: &str, port: u16, web_port: u16) {
+fn start_udp_broadcast(_host: &str, port: u16, web_port: u16) {
     let service_info = serde_json::json!({
         "name": "AudioRelay",
         "ws_port": port,
@@ -164,7 +165,7 @@ fn start_udp_broadcast(host: &str, port: u16, web_port: u16) {
     });
 }
 
-async fn restart_audio_capture(state: &AppState, rate: u32) -> Result<()> {
+async fn restart_audio_capture(state: &AppState, _rate: u32) -> Result<()> {
     let _guard = state.restart_lock.lock().await;
 
     let old = state.audio_capture.write().await.take();
@@ -210,7 +211,7 @@ async fn handle_connection(
     addr: SocketAddr,
     broadcast_tx: broadcast::Sender<(u32, Vec<u8>)>,
     clients: ClientInfo,
-    state: Arc<AppState>,
+    _state: Arc<AppState>,
 ) {
     let ws_stream = match accept_async(stream).await {
         Ok(ws) => ws,

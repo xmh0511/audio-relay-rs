@@ -1,5 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[allow(dead_code)]
 pub fn current_timestamp_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -7,6 +8,7 @@ pub fn current_timestamp_ms() -> u64 {
         .as_millis() as u64
 }
 
+#[allow(dead_code)]
 pub fn format_bytes(bytes: usize) -> String {
     if bytes < 1024 {
         format!("{} B", bytes)

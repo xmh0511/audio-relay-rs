@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
-use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
 use tungstenite::Message as WsMessage;
@@ -93,7 +92,6 @@ pub async fn run_client(server_host: &str, port: u16, as_mic: bool) -> Result<()
                 .context("Failed to initialize audio playback")?;
 
             let audio_tx = audio_tx;
-            let ws_sender = Arc::new(tokio::sync::Mutex::new(ws_sender));
 
             let mut current_sample_rate = crate::protocol::SAMPLE_RATE;
             let recv_handle = tokio::spawn(async move {
