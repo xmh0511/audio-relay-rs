@@ -104,8 +104,9 @@ pub async fn run_server(host: &str, port: u16, web_port: u16) -> Result<()> {
         }
     });
 
-    let default_rate = ACTUAL_SAMPLE_RATE.load(std::sync::atomic::Ordering::Relaxed);
-    replace_audio_capture(&state, default_rate).await.ok();
+    let detected_rate = crate::audio::capture::detect_sample_rate();
+    ACTUAL_SAMPLE_RATE.store(detected_rate, std::sync::atomic::Ordering::Relaxed);
+    replace_audio_capture(&state, detected_rate).await.ok();
 
     server_handle.await?;
     Ok(())

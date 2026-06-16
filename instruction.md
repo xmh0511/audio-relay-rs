@@ -83,9 +83,12 @@ pub struct AudioCapture {
 }
 ```
 
+- `detect_sample_rate()` — 启动时查询默认音频设备的原生采样率（WASAPI `get_mixformat()` / cpal `default_output_config()`），返回设备真实采样率
 - `new()` — 在新 OS 线程中启动采集（非 tokio 线程，避免阻塞异步运行时）
 - `stop()` — 设置 stop_flag，采集线程会在下次循环检查时退出
 - `wait_stopped()` — 异步等待采集线程结束（通过 oneshot channel）
+
+服务器启动时调用 `detect_sample_rate()` 获取设备真实采样率，写入 `ACTUAL_SAMPLE_RATE`，避免预设值与实际设备不匹配。
 
 #### Windows 路径 (`capture_windows`)
 

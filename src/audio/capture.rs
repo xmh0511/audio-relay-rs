@@ -2,6 +2,79 @@ use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
+pub fn detect_sample_rate() -> u32 {
+    #[cfg(target_os = "windows")]
+    {
+        detect_sample_rate_windows()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        detect_sample_rate_cpal()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn detect_sample_rate_windows() -> u32 {
+    use wasapi::*;
+
+    let _ = initialize_mta();
+
+    let device = match get_default_device(&Direction::Render) {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!("Failed to get default device for rate detection: {:?}", e);
+            return 44100;
+        }
+    };
+
+    let audio_client = match device.get_iaudioclient() {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("Failed to get audio client for rate detection: {:?}", e);
+            return 44100;
+        }
+    };
+
+    let mix_format = match audio_client.get_mixformat() {
+        Ok(f) => f,
+        Err(e) => {
+            log::warn!("Failed to get mix format: {:?}", e);
+            return 44100;
+        }
+    };
+
+    let rate = mix_format.get_samplespersec();
+    log::info!("Detected device sample rate: {}Hz", rate);
+    rate
+}
+
+#[cfg(not(target_os = "windows"))]
+fn detect_sample_rate_cpal() -> u32 {
+    use cpal::traits::{DeviceTrait, HostTrait};
+
+    let host = cpal::default_host();
+
+    let device = match host.default_output_device() {
+        Some(d) => d,
+        None => {
+            log::warn!("No output device for rate detection");
+            return 44100;
+        }
+    };
+
+    let config = match device.default_output_config() {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("Failed to get default output config: {}", e);
+            return 44100;
+        }
+    };
+
+    let rate = config.sample_rate().0;
+    log::info!("Detected device sample rate: {}Hz", rate);
+    rate
+}
+
 struct StopNotifier(Option<oneshot::Sender<()>>);
 
 impl StopNotifier {
