@@ -23,62 +23,59 @@ class ServerDiscovery {
 
     fun startListening() {
         scope.launch {
-            while (isActive) {
-                try {
-                    discover()
-                } catch (e: Exception) {
-                    if (isActive) {
-                        Log.e("Discovery", "Error: ${e.message}")
-                    }
-                }
-                delay(3000)
-            }
-        }
-    }
-
-    private suspend fun discover() {
-        withContext(Dispatchers.IO) {
             val socket = DatagramSocket()
             socket.soTimeout = 2000
             socket.broadcast = true
 
             try {
-                val msg = "DISCOVER_AUDIO_RELAY".toByteArray()
-                val broadcast = InetAddress.getByName("255.255.255.255")
-                val sendPacket = DatagramPacket(msg, msg.size, broadcast, 8082)
-                socket.send(sendPacket)
-                Log.d("Discovery", "Sent discovery request")
-
-                val buffer = ByteArray(1024)
-                val recvPacket = DatagramPacket(buffer, buffer.size)
-                socket.receive(recvPacket)
-
-                val data = String(recvPacket.data, 0, recvPacket.length)
-                val address = recvPacket.address.hostAddress ?: return@withContext
-
-                Log.d("Discovery", "Response from $address: $data")
-
-                val json = JSONObject(data)
-                val wsPort = json.optInt("ws_port", 8080)
-                val webPort = json.optInt("web_port", 8081)
-                val name = json.optString("name", "AudioRelay")
-
-                val key = "$address:$wsPort"
-                servers[key] = DiscoveredServer(
-                    address = address,
-                    wsPort = wsPort,
-                    webPort = webPort,
-                    name = name,
-                    lastSeen = System.currentTimeMillis()
-                )
-
-                withContext(Dispatchers.Main) {
-                    updateList()
+                while (isActive) {
+                    try {
+                        discover(socket)
+                    } catch (e: Exception) {
+                        if (isActive) {
+                            Log.e("Discovery", "Error: ${e.message}")
+                        }
+                    }
+                    delay(3000)
                 }
-            } catch (e: java.net.SocketTimeoutException) {
-                Log.d("Discovery", "No response within timeout")
             } finally {
                 socket.close()
+            }
+        }
+    }
+
+    private suspend fun discover(socket: DatagramSocket) {
+        withContext(Dispatchers.IO) {
+            val msg = "DISCOVER_AUDIO_RELAY".toByteArray()
+            val broadcast = InetAddress.getByName("255.255.255.255")
+            val sendPacket = DatagramPacket(msg, msg.size, broadcast, 8082)
+            socket.send(sendPacket)
+
+            val buffer = ByteArray(1024)
+            val recvPacket = DatagramPacket(buffer, buffer.size)
+            socket.receive(recvPacket)
+
+            val data = String(recvPacket.data, 0, recvPacket.length)
+            val address = recvPacket.address.hostAddress ?: return@withContext
+
+            Log.d("Discovery", "Response from $address: $data")
+
+            val json = JSONObject(data)
+            val wsPort = json.optInt("ws_port", 8080)
+            val webPort = json.optInt("web_port", 8081)
+            val name = json.optString("name", "AudioRelay")
+
+            val key = "$address:$wsPort"
+            servers[key] = DiscoveredServer(
+                address = address,
+                wsPort = wsPort,
+                webPort = webPort,
+                name = name,
+                lastSeen = System.currentTimeMillis()
+            )
+
+            withContext(Dispatchers.Main) {
+                updateList()
             }
         }
     }

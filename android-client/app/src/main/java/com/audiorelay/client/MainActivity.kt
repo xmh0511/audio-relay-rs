@@ -211,6 +211,18 @@ fun AudioRelayScreen() {
                         onClick = {
                             serverHost = server.address
                             serverPort = server.wsPort.toString()
+                            val intent = Intent(context, AudioRelayService::class.java).apply {
+                                action = AudioRelayService.ACTION_START
+                                putExtra("host", server.address)
+                                putExtra("port", server.wsPort)
+                            }
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                context.startForegroundService(intent)
+                            } else {
+                                context.startService(intent)
+                            }
+                            isPlaying = true
+                            Toast.makeText(context, "Connecting to ${server.address}:${server.wsPort}", Toast.LENGTH_SHORT).show()
                         },
                         modifier = Modifier
                             .fillMaxWidth()
