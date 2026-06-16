@@ -95,7 +95,21 @@ fun AudioRelayScreen() {
     var audioLevel by remember { mutableFloatStateOf(0f) }
     var latency by remember { mutableFloatStateOf(0f) }
     var avgLatency by remember { mutableFloatStateOf(0f) }
+    var discoveredServers by remember { mutableStateOf<List<DiscoveredServer>>(emptyList()) }
+    var showServerList by remember { mutableStateOf(false) }
     val context = LocalContext.current
+
+    val discovery = remember { ServerDiscovery() }
+
+    DisposableEffect(Unit) {
+        discovery.onServersUpdated = { servers ->
+            discoveredServers = servers
+        }
+        discovery.startListening()
+        onDispose {
+            discovery.stopListening()
+        }
+    }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -188,6 +202,54 @@ fun AudioRelayScreen() {
                 ),
                 singleLine = true
             )
+
+            if (discoveredServers.isNotEmpty() && !isPlaying) {
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = "Discovered Servers",
+                    color = Color.White.copy(alpha = 0.5f),
+                    fontSize = 12.sp
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                discoveredServers.forEach { server ->
+                    Surface(
+                        onClick = {
+                            serverHost = server.address
+                            serverPort = server.wsPort.toString()
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        color = Color(0xFF16213E),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.Computer,
+                                contentDescription = null,
+                                tint = Color(0xFF533483),
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text(
+                                    text = server.name,
+                                    color = Color.White,
+                                    fontSize = 14.sp
+                                )
+                                Text(
+                                    text = "${server.address}:${server.wsPort}",
+                                    color = Color.White.copy(alpha = 0.5f),
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            }
 
             Spacer(modifier = Modifier.height(32.dp))
 

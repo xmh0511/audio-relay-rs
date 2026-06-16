@@ -41,6 +41,8 @@ pub async fn run_server(host: &str, port: u16, web_port: u16) -> Result<()> {
     let listener = TcpListener::bind(&addr).await?;
     log::info!("Server listening on {}", addr);
 
+    start_udp_broadcast(host, port, web_port);
+
     let (broadcast_tx, _) = broadcast::channel::<(u32, Vec<u8>)>(1000);
 
     let state = Arc::new(AppState {
@@ -122,6 +124,38 @@ async fn start_audio_capture(state: Arc<AppState>) {
             log::error!("Failed to start audio capture: {}", e);
         }
     }
+}
+
+fn start_udp_broadcast(host: &str, port: u16, web_port: u16) {
+    let broadcast_addr = "255.255.255.255:8082";
+    let service_info = serde_json::json!({
+        "name": "AudioRelay",
+        "ws_port": port,
+        "web_port": web_port,
+    })
+    .to_string();
+
+    std::thread::spawn(move || {
+        let socket = match std::net::UdpSocket::bind("0.0.0.0:0") {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("Failed to bind UDP socket: {}", e);
+                return;
+            }
+        };
+        socket
+            .set_broadcast(true)
+            .expect("Failed to set broadcast");
+
+        log::info!("UDP broadcast on {}", broadcast_addr);
+
+        loop {
+            if let Err(e) = socket.send_to(service_info.as_bytes(), broadcast_addr) {
+                log::debug!("UDP broadcast error: {}", e);
+            }
+            std::thread::sleep(std::time::Duration::from_secs(3));
+        }
+    });
 }
 
 async fn restart_audio_capture(state: &AppState, rate: u32) -> Result<()> {
