@@ -98,17 +98,14 @@ WASAPI Loopback 捕获系统音频输出：
 
 **16-bit 数据的字节序处理**：
 
-WASAPI 返回的 PCM 数据是 **little-endian** 格式。这是由 Windows 平台决定的：
+WASAPI 返回的 PCM 数据是 **little-endian** 格式。依据如下：
 
-> Windows 只运行在 little-endian 架构上（x86、x64、ARM LE 模式），
-> WASAPI 的 PCM 数据字节序与平台 native endian 一致。
-
-参考文档：
-- [WAVEFORMATEX (mmeapi.h)](https://learn.microsoft.com/en-us/windows/win32/api/mmeapi/ns-mmeapi-waveformatex)
-  - `wBitsPerSample` 定义每样本位数
-  - PCM 数据按平台原生字节序存储
-- [WAVEFORMATEXTENSIBLE](https://learn.microsoft.com/en-us/windows/win32/api/mmreg/ns-mmreg-waveformatextensible)
-  - 扩展格式，支持更多声道和位深
+1. WAV 文件格式（RIFF WAVE）明确规定多字节值以 little-endian 存储：
+   > "Data is stored in little-endian byte order."
+   > — [WAV - Wikipedia](https://en.wikipedia.org/wiki/WAV#WAV_file_header)
+2. WASAPI 使用的 `WAVEFORMATEX` 结构与 WAV 文件格式共享相同定义：
+   > [WAVEFORMATEX (mmeapi.h)](https://learn.microsoft.com/en-us/windows/win32/api/mmeapi/ns-mmeapi-waveformatex)
+3. Windows 只运行在 little-endian 架构上（x86、x64、ARM LE 模式），WASAPI 的 PCM 数据与平台 native endian 一致
 
 因此在 16-bit 路径中，可以直接 `unsafe` reinterpret `&[u8]` 为 `&[i16]`：
 
