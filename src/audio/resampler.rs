@@ -7,6 +7,8 @@ pub struct AudioResampler {
     source_rate: u32,
     target_rate: u32,
     channels: usize,
+    chunk_size: usize,
+    input_buffer: Vec<Vec<f64>>,
 }
 
 impl AudioResampler {
@@ -14,6 +16,8 @@ impl AudioResampler {
         if source_rate == target_rate {
             return Err("source and target rate are the same".into());
         }
+
+        let chunk_size = 1024;
 
         let params = SincInterpolationParameters {
             sinc_len: 256,
@@ -27,16 +31,14 @@ impl AudioResampler {
             source_rate as f64 / target_rate as f64,
             2.0,
             params,
-            1024,
+            chunk_size,
             channels,
         )
         .map_err(|e| format!("Failed to create resampler: {:?}", e))?;
 
         log::info!(
-            "Resampler created: {}Hz -> {}Hz, {}ch",
-            source_rate,
-            target_rate,
-            channels
+            "Resampler created: {}Hz -> {}Hz, {}ch, chunk={}",
+            source_rate, target_rate, channels, chunk_size
         );
 
         Ok(Self {
@@ -44,6 +46,8 @@ impl AudioResampler {
             source_rate,
             target_rate,
             channels,
+            chunk_size,
+            input_buffer: vec![Vec::with_capacity(chunk_size * 2); channels],
         })
     }
 
@@ -52,28 +56,33 @@ impl AudioResampler {
             return Ok(input.to_vec());
         }
 
-        let frames_per_channel = input.len() / self.channels;
-
-        let mut channels_data: Vec<Vec<f64>> =
-            vec![Vec::with_capacity(frames_per_channel); self.channels];
-
         for (i, &sample) in input.iter().enumerate() {
             let ch = i % self.channels;
-            channels_data[ch].push(sample as f64 / i16::MAX as f64);
+            self.input_buffer[ch].push(sample as f64 / i16::MAX as f64);
         }
 
-        let output = self
-            .resampler
-            .process(&channels_data, None)
-            .map_err(|e| format!("Resample error: {:?}", e))?;
+        let mut result = Vec::new();
 
-        let output_frames = output[0].len();
-        let mut result = Vec::with_capacity(output_frames * self.channels);
+        while self.input_buffer[0].len() >= self.chunk_size {
+            let channels_data: Vec<Vec<f64>> = self
+                .input_buffer
+                .iter_mut()
+                .map(|buf| buf.drain(..self.chunk_size).collect())
+                .collect();
 
-        for frame in 0..output_frames {
-            for ch in 0..self.channels {
-                let sample = output[ch][frame].clamp(-1.0, 1.0) * i16::MAX as f64;
-                result.push(sample as i16);
+            let output = self
+                .resampler
+                .process(&channels_data, None)
+                .map_err(|e| format!("Resample error: {:?}", e))?;
+
+            let output_frames = output[0].len();
+            result.reserve(output_frames * self.channels);
+
+            for frame in 0..output_frames {
+                for ch in 0..self.channels {
+                    let sample = output[ch][frame].clamp(-1.0, 1.0) * i16::MAX as f64;
+                    result.push(sample as i16);
+                }
             }
         }
 
