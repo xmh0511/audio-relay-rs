@@ -59,8 +59,18 @@ pub struct AudioFrame {
 [0..8]   sequence   u64 LE
 [8..16]  timestamp  u64 LE
 [16..20] sample_rate u32 LE
-[20..]   pcm_data   raw bytes
+[20..]   pcm_data   i16 LE 字节序列
 ```
+
+**pcm_data 字节序保证**：`pcm_data` 在所有平台下都是以 little-endian 字节序存储的 i16 数据序列。这**不是**由 `encode_audio_frame()` 保证的（它只是原样拷贝 `frame.data`），而是由各平台的音频采集代码保证的。具体来说：
+
+- **Windows 16-bit mono**：WASAPI 原始数据本身就是 LE（见下文 WASAPI 字节序说明），直接拷贝 `raw_chunk` 作为 `send_data`
+- **Windows 16-bit stereo**：从 WASAPI LE 数据中 reinterpret 为 `&[i16]`，混音后通过 `.to_le_bytes()` 显式写入
+- **Windows 32-bit**：`convert_to_i16_pcm()` 将 f32 转换为 i16 后用 `.to_le_bytes()` 写入
+- **Linux/macOS**：`float_to_i16_bytes()` 将 cpal f32 转换为 i16 后用 `.to_le_bytes()` 写入
+- **重采样路径**：`AudioResampler::resample()` 输出 `Vec<i16>`，发送前通过 `.to_le_bytes()` 转为 LE 字节
+
+所有分支最终输出的 `send_data` 都是 i16 LE 格式，因此接收端（Android/PC）可直接使用，无需字节序转换。
 
 ---
 
@@ -252,6 +262,16 @@ val timestamp = ByteBuffer.wrap(buffer, 8, 8).order(LITTLE_ENDIAN).long
 val sampleRate = ByteBuffer.wrap(buffer, 16, 4).order(LITTLE_ENDIAN).int
 val pcmData = buffer.copyOfRange(20, buffer.size)
 ```
+
+**为什么 Android 可以直接将 pcmData 写入 AudioTrack 而无需字节序转换？**
+
+Rust 服务端发送的 PCM 数据已经是 little-endian 格式（通过 `i16::to_le_bytes()` 写入）。Android 端不需要做任何转换，原因如下：
+
+1. **Rust 端保证 LE 输出**：服务端在编码音频帧时显式使用 `.to_le_bytes()`，无论源平台是什么字节序，输出的 PCM 字节流都是 little-endian
+2. **AudioTrack 接受原始字节**：`AudioTrack.write(byte[], offset, size)` 将字节数组作为 `ENCODING_PCM_16BIT` 格式直接写入音频缓冲区，不做字节序转换
+3. **Android 音频栈全链路 LE**：Android 运行在 little-endian 架构上（ARM LE），AudioTrack → Audio HAL → 音频驱动 → DSP 硬件 整条链路都以 LE 格式处理 PCM 数据
+
+因此 `pcmData`（已经是 LE 的 i16 字节序列）可以直接传给 `audioTrack.write()`，无需任何 `from_le_bytes` 或 `to_le_bytes` 转换。
 
 #### MainActivity.kt
 
