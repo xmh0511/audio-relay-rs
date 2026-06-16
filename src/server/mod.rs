@@ -34,8 +34,6 @@ pub struct AppState {
     pub audio_capture: Arc<RwLock<Option<AudioCapture>>>,
     pub broadcast_tx: broadcast::Sender<Vec<u8>>,
     pub broadcast_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-    pub pending_acks: Arc<std::sync::atomic::AtomicUsize>,
-    pub ack_notify: Arc<tokio::sync::Notify>,
 }
 
 pub async fn run_server(host: &str, port: u16, web_port: u16) -> Result<()> {
@@ -53,8 +51,6 @@ pub async fn run_server(host: &str, port: u16, web_port: u16) -> Result<()> {
         audio_capture: Arc::new(RwLock::new(None)),
         broadcast_tx: broadcast_tx.clone(),
         broadcast_handle: Arc::new(Mutex::new(None)),
-        pending_acks: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        ack_notify: Arc::new(tokio::sync::Notify::new()),
     });
 
     let web_state = state.clone();
@@ -141,47 +137,8 @@ async fn restart_audio_capture(state: &AppState, rate: u32) -> Result<()> {
         handle.abort();
     }
 
-    let client_count = {
-        let clients = state.clients.read().await;
-        clients.len()
-    };
-
-    if client_count > 0 {
-        state
-            .pending_acks
-            .store(client_count, std::sync::atomic::Ordering::Relaxed);
-
-        let msg = Message::SampleRateChange { sample_rate: rate };
-        broadcast_to_all_clients(&state.clients, &msg).await;
-        log::info!(
-            "Sent SampleRateChange to {} clients, waiting for acks...",
-            client_count
-        );
-
-        let deadline =
-            tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
-
-        loop {
-            let remaining = state
-                .pending_acks
-                .load(std::sync::atomic::Ordering::Relaxed);
-            if remaining == 0 {
-                log::info!("All clients acknowledged sample rate change");
-                break;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                log::warn!(
-                    "Timeout waiting for {} client acks, proceeding anyway",
-                    remaining
-                );
-                break;
-            }
-            tokio::select! {
-                _ = state.ack_notify.notified() => {}
-                _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
-            }
-        }
-    }
+    ACTUAL_SAMPLE_RATE.store(rate, std::sync::atomic::Ordering::Relaxed);
+    *state.sample_rate.write().await = rate;
 
     let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(200);
     let broadcast_tx = state.broadcast_tx.clone();
@@ -311,9 +268,12 @@ async fn handle_connection(
                                     loop {
                                         match broadcast_rx.recv().await {
                                             Ok(data) => {
+                                                let rate = ACTUAL_SAMPLE_RATE
+                                                    .load(std::sync::atomic::Ordering::Relaxed);
                                                 let msg = Message::AudioData {
                                                     sequence: seq,
                                                     timestamp: timestamp_ms(),
+                                                    sample_rate: rate,
                                                     data,
                                                 };
                                                 seq += 1;
@@ -388,19 +348,6 @@ async fn handle_connection(
                             }
                         }
                     }
-                    Some(Message::SampleRateChangeAck { sample_rate }) => {
-                        log::debug!(
-                            "Client {:?} acknowledged sample rate change to {}Hz",
-                            client_id,
-                            sample_rate
-                        );
-                        let remaining = state
-                            .pending_acks
-                            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-                        if remaining <= 1 {
-                            state.ack_notify.notify_one();
-                        }
-                    }
                     Some(_) => {}
                     None => {
                         log::warn!("Invalid message from {}", addr);
@@ -429,18 +376,6 @@ async fn handle_connection(
         log::info!("Client {} removed", id);
     }
     log::info!("Connection closed for {}", addr);
-}
-
-async fn broadcast_to_all_clients(clients: &ClientInfo, msg: &Message) {
-    if let Ok(json) = serde_json::to_string(msg) {
-        let clients_map = clients.read().await;
-        for entry in clients_map.values() {
-            let mut guard = entry.ws_sender.lock().await;
-            if let Some(sender) = guard.as_mut() {
-                let _ = sender.send(WsMessage::Text(json.clone())).await;
-            }
-        }
-    }
 }
 
 async fn start_web_server(port: u16, state: Arc<AppState>) {
@@ -478,7 +413,7 @@ async fn get_clients(AxumState(state): AxumState<Arc<AppState>>) -> Json<Value> 
     Json(json!({ "clients": list }))
 }
 
-async fn get_sample_rate(AxumState(state): AxumState<Arc<AppState>>) -> Json<Value> {
+async fn get_sample_rate(AxumState(_state): AxumState<Arc<AppState>>) -> Json<Value> {
     let rate = ACTUAL_SAMPLE_RATE.load(std::sync::atomic::Ordering::Relaxed);
     Json(json!({ "sample_rate": rate }))
 }
@@ -492,9 +427,6 @@ async fn set_sample_rate(
     };
 
     let rate = rate as u32;
-    ACTUAL_SAMPLE_RATE.store(rate, std::sync::atomic::Ordering::Relaxed);
-    *state.sample_rate.write().await = rate;
-
     log::info!("Sample rate changed to {}Hz, restarting capture...", rate);
 
     if let Err(e) = restart_audio_capture(&state, rate).await {

@@ -19,6 +19,7 @@ pub enum Message {
     AudioData {
         sequence: u64,
         timestamp: u64,
+        sample_rate: u32,
         data: Vec<u8>,
     },
     AudioDataAck {
@@ -32,12 +33,6 @@ pub enum Message {
     },
     LatencyReport {
         latency_ms: f64,
-    },
-    SampleRateChange {
-        sample_rate: u32,
-    },
-    SampleRateChangeAck {
-        sample_rate: u32,
     },
     StreamStart {
         direction: StreamDirection,

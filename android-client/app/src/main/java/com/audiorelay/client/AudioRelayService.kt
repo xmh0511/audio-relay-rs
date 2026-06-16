@@ -43,6 +43,7 @@ class AudioRelayService : Service() {
 
     private var currentState = ServiceState.DISCONNECTED
     private var latencySamples = mutableListOf<Float>()
+    private var currentSampleRate = SAMPLE_RATE
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -160,6 +161,7 @@ class AudioRelayService : Service() {
                 val sessionId = ack.optString("session_id", "")
                 val serverSampleRate = ack.optInt("sample_rate", SAMPLE_RATE)
                 Log.d(TAG, "HelloAck: session=$sessionId, rate=$serverSampleRate")
+                currentSampleRate = serverSampleRate
                 initAudioTrack(serverSampleRate)
                 updateNotification("Streaming audio…")
                 updateState(ServiceState.STREAMING)
@@ -168,6 +170,12 @@ class AudioRelayService : Service() {
                 val audioData = json.getJSONObject("AudioData")
                 val data = audioData.getJSONArray("data")
                 val sequence = audioData.optLong("sequence", 0)
+                val sampleRate = audioData.optInt("sample_rate", currentSampleRate)
+                if (sampleRate != currentSampleRate) {
+                    Log.d(TAG, "Sample rate changed: ${currentSampleRate}Hz -> ${sampleRate}Hz")
+                    currentSampleRate = sampleRate
+                    initAudioTrack(sampleRate)
+                }
                 playAudio(data, sequence)
             }
             json.has("Pong") -> {
@@ -191,19 +199,6 @@ class AudioRelayService : Service() {
                     })
                 }
                 webSocket?.send(pong.toString())
-            }
-            json.has("SampleRateChange") -> {
-                val change = json.getJSONObject("SampleRateChange")
-                val newRate = change.optInt("sample_rate", SAMPLE_RATE)
-                Log.d(TAG, "SampleRateChange: ${newRate}Hz, rebuilding AudioTrack")
-                initAudioTrack(newRate)
-                val ack = JSONObject().apply {
-                    put("SampleRateChangeAck", JSONObject().apply {
-                        put("sample_rate", newRate)
-                    })
-                }
-                webSocket?.send(ack.toString())
-                Log.d(TAG, "Sent SampleRateChangeAck for ${newRate}Hz")
             }
         }
     }
