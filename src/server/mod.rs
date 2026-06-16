@@ -31,7 +31,7 @@ pub struct ClientEntry {
 pub struct AppState {
     pub clients: ClientInfo,
     pub audio_capture: Arc<RwLock<Option<AudioCapture>>>,
-    pub broadcast_tx: broadcast::Sender<Vec<u8>>,
+    pub broadcast_tx: broadcast::Sender<(u32, Vec<u8>)>,
     pub broadcast_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     pub restart_lock: Arc<Mutex<()>>,
 }
@@ -41,7 +41,7 @@ pub async fn run_server(host: &str, port: u16, web_port: u16) -> Result<()> {
     let listener = TcpListener::bind(&addr).await?;
     log::info!("Server listening on {}", addr);
 
-    let (broadcast_tx, _) = broadcast::channel::<Vec<u8>>(1000);
+    let (broadcast_tx, _) = broadcast::channel::<(u32, Vec<u8>)>(1000);
 
     let state = Arc::new(AppState {
         clients: Arc::new(RwLock::new(HashMap::new())),
@@ -112,8 +112,9 @@ async fn start_audio_capture(state: Arc<AppState>) {
             log::info!("System audio capture started");
 
             let handle = tokio::spawn(async move {
+                let rate = ACTUAL_SAMPLE_RATE.load(std::sync::atomic::Ordering::Relaxed);
                 while let Some(data) = audio_rx.recv().await {
-                    let _ = broadcast_tx.send(data);
+                    let _ = broadcast_tx.send((rate, data));
                 }
             });
             *state.broadcast_handle.lock().await = Some(handle);
@@ -149,7 +150,7 @@ async fn restart_audio_capture(state: &AppState, rate: u32) -> Result<()> {
 
             let handle = tokio::spawn(async move {
                 while let Some(data) = audio_rx.recv().await {
-                    let _ = broadcast_tx.send(data);
+                    let _ = broadcast_tx.send((rate, data));
                 }
             });
             *state.broadcast_handle.lock().await = Some(handle);
@@ -170,7 +171,7 @@ type WsSplitSink = futures_util::stream::SplitSink<
 async fn handle_connection(
     stream: TcpStream,
     addr: SocketAddr,
-    broadcast_tx: broadcast::Sender<Vec<u8>>,
+    broadcast_tx: broadcast::Sender<(u32, Vec<u8>)>,
     clients: ClientInfo,
     state: Arc<AppState>,
 ) {
@@ -266,9 +267,7 @@ async fn handle_connection(
                                     let mut seq: u64 = 0;
                                     loop {
                                         match broadcast_rx.recv().await {
-                                            Ok(data) => {
-                                                let rate = ACTUAL_SAMPLE_RATE
-                                                    .load(std::sync::atomic::Ordering::Relaxed);
+                                            Ok((rate, data)) => {
                                                 let msg = Message::AudioData {
                                                     sequence: seq,
                                                     timestamp: timestamp_ms(),
@@ -309,9 +308,9 @@ async fn handle_connection(
                             }
                         }
                     }
-                    Some(Message::AudioData { sequence, data, .. }) => {
+                    Some(Message::AudioData { sequence, data, sample_rate, .. }) => {
                         if client_mode == Some(StreamMode::Microphone) {
-                            let _ = broadcast_tx.send(data);
+                            let _ = broadcast_tx.send((sample_rate, data));
 
                             let ack = Message::AudioDataAck { sequence };
                             if let Ok(ack_bytes) = serde_json::to_string(&ack) {
