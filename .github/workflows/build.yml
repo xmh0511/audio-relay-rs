@@ -175,11 +175,13 @@ jobs:
           cd artifacts
           TAG=${{ steps.version.outputs.tag }}
           mv AudioRelay.apk AudioRelay-${TAG}.apk
-          for f in server-*/*; do
-            base=$(basename "$f")
-            ext="${base##*.}"
-            name="${base%.*}"
-            mv "$f" "AudioRelay-${TAG}-${name}.${ext}"
+          for f in *.zip *.tar.gz; do
+            [ -f "$f" ] || continue
+            base="${f%.zip}"
+            base="${base%.tar.gz}"
+            ext="${f##*.}"
+            [ "$ext" = "tar" ] && ext="tar.gz" && base="${f%.tar.gz}"
+            mv "$f" "AudioRelay-${TAG}-${base}.${ext}"
           done
 
       - name: Create Release
