@@ -222,30 +222,109 @@ fn capture_windows(
                 }
             }
 
-            pcm_output.clear();
-            convert_to_i16_pcm(&raw_chunk[..bytes_to_send], bits_per_sample, device_channels, &mut pcm_output);
+            let send_data;
+            let send_rate;
 
-            let (send_rate, send_data) = if let Some(ref mut resampler) = resampler {
-                let i16_data: Vec<i16> = pcm_output
-                    .chunks_exact(2)
-                    .map(|c| i16::from_le_bytes([c[0], c[1]]))
-                    .collect();
-                match resampler.resample(&i16_data) {
-                    Ok(resampled) => {
-                        let mut bytes = Vec::with_capacity(resampled.len() * 2);
-                        for s in resampled {
-                            bytes.extend_from_slice(&s.to_le_bytes());
+            if bits_per_sample == 16 && device_channels == 1 {
+                let i16_slice = unsafe {
+                    std::slice::from_raw_parts(raw_chunk.as_ptr() as *const i16, bytes_to_send / 2)
+                };
+
+                if let Some(ref mut resampler) = resampler {
+                    match resampler.resample(i16_slice) {
+                        Ok(resampled) => {
+                            let mut bytes = Vec::with_capacity(resampled.len() * 2);
+                            for s in resampled {
+                                bytes.extend_from_slice(&s.to_le_bytes());
+                            }
+                            send_data = bytes;
+                            send_rate = target_rate;
                         }
-                        (target_rate, bytes)
+                        Err(e) => {
+                            log::warn!("Resample error: {}", e);
+                            send_data = raw_chunk[..bytes_to_send].to_vec();
+                            send_rate = device_sample_rate;
+                        }
                     }
-                    Err(e) => {
-                        log::warn!("Resample error: {}", e);
-                        (device_sample_rate, pcm_output.clone())
+                } else {
+                    send_data = raw_chunk[..bytes_to_send].to_vec();
+                    send_rate = device_sample_rate;
+                }
+            } else if bits_per_sample == 16 && device_channels == 2 {
+                let sample_count = bytes_to_send / 2;
+                let i16_slice = unsafe {
+                    std::slice::from_raw_parts(raw_chunk.as_ptr() as *const i16, sample_count)
+                };
+                let mono_count = sample_count / 2;
+                let mut mono_i16 = Vec::with_capacity(mono_count);
+                for i in 0..mono_count {
+                    let left = i16_slice[i * 2] as i32;
+                    let right = i16_slice[i * 2 + 1] as i32;
+                    mono_i16.push(((left + right) / 2) as i16);
+                }
+
+                if let Some(ref mut resampler) = resampler {
+                    match resampler.resample(&mono_i16) {
+                        Ok(resampled) => {
+                            let mut bytes = Vec::with_capacity(resampled.len() * 2);
+                            for s in resampled {
+                                bytes.extend_from_slice(&s.to_le_bytes());
+                            }
+                            send_data = bytes;
+                            send_rate = target_rate;
+                        }
+                        Err(e) => {
+                            log::warn!("Resample error: {}", e);
+                            let mut bytes = Vec::with_capacity(mono_i16.len() * 2);
+                            for s in &mono_i16 {
+                                bytes.extend_from_slice(&s.to_le_bytes());
+                            }
+                            send_data = bytes;
+                            send_rate = device_sample_rate;
+                        }
                     }
+                } else {
+                    let mut bytes = Vec::with_capacity(mono_i16.len() * 2);
+                    for s in &mono_i16 {
+                        bytes.extend_from_slice(&s.to_le_bytes());
+                    }
+                    send_data = bytes;
+                    send_rate = device_sample_rate;
                 }
             } else {
-                (device_sample_rate, pcm_output.clone())
-            };
+                pcm_output.clear();
+                convert_to_i16_pcm(
+                    &raw_chunk[..bytes_to_send],
+                    bits_per_sample,
+                    device_channels,
+                    &mut pcm_output,
+                );
+
+                if let Some(ref mut resampler) = resampler {
+                    let i16_data: Vec<i16> = pcm_output
+                        .chunks_exact(2)
+                        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                        .collect();
+                    match resampler.resample(&i16_data) {
+                        Ok(resampled) => {
+                            let mut bytes = Vec::with_capacity(resampled.len() * 2);
+                            for s in resampled {
+                                bytes.extend_from_slice(&s.to_le_bytes());
+                            }
+                            send_data = bytes;
+                            send_rate = target_rate;
+                        }
+                        Err(e) => {
+                            log::warn!("Resample error: {}", e);
+                            send_data = pcm_output.clone();
+                            send_rate = device_sample_rate;
+                        }
+                    }
+                } else {
+                    send_data = pcm_output.clone();
+                    send_rate = device_sample_rate;
+                }
+            }
 
             if tx.try_send((send_rate, send_data)).is_err() {
                 log::warn!("Audio channel full, dropping frame");
@@ -299,7 +378,13 @@ fn convert_to_i16_pcm(raw: &[u8], bits_per_sample: usize, channels: usize, outpu
                     output.extend_from_slice(&mixed.to_le_bytes());
                 }
             } else {
-                output.extend_from_slice(raw);
+                let sample_count = raw.len() / 2;
+                let samples =
+                    unsafe { std::slice::from_raw_parts(raw.as_ptr() as *const i16, sample_count) };
+                output.reserve(sample_count * 2 - output.len());
+                for &s in samples {
+                    output.extend_from_slice(&s.to_le_bytes());
+                }
             }
         }
         _ => {

@@ -11,7 +11,9 @@ use tokio_tungstenite::accept_async;
 use tungstenite::Message as WsMessage;
 
 use crate::audio::capture::AudioCapture;
-use crate::protocol::{encode_audio_frame, decode_audio_frame, timestamp_ms, AudioFrame, Message, StreamMode, CHANNELS};
+use crate::protocol::{
+    decode_audio_frame, encode_audio_frame, timestamp_ms, AudioFrame, Message, StreamMode, CHANNELS,
+};
 
 pub static ACTUAL_SAMPLE_RATE: std::sync::atomic::AtomicU32 =
     std::sync::atomic::AtomicU32::new(44100);
@@ -324,9 +326,7 @@ async fn handle_connection(
                     }
                 }
                 Some(Message::AudioData {
-                    data,
-                    sample_rate,
-                    ..
+                    data, sample_rate, ..
                 }) => {
                     if client_mode == Some(StreamMode::Microphone) {
                         let _ = broadcast_tx.send((sample_rate, data));

@@ -36,19 +36,17 @@ impl AudioPlayback {
         let stream = device
             .build_output_stream(
                 &config,
-                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    match rx.try_recv() {
-                        Ok(pcm_bytes) => {
-                            let samples = i16_bytes_to_float(&pcm_bytes);
-                            let len = data.len().min(samples.len());
-                            data[..len].copy_from_slice(&samples[..len]);
-                            if len < data.len() {
-                                data[len..].fill(0.0);
-                            }
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| match rx.try_recv() {
+                    Ok(pcm_bytes) => {
+                        let samples = i16_bytes_to_float(&pcm_bytes);
+                        let len = data.len().min(samples.len());
+                        data[..len].copy_from_slice(&samples[..len]);
+                        if len < data.len() {
+                            data[len..].fill(0.0);
                         }
-                        Err(_) => {
-                            data.fill(0.0);
-                        }
+                    }
+                    Err(_) => {
+                        data.fill(0.0);
                     }
                 },
                 |err| {

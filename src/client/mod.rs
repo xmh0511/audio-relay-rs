@@ -7,10 +7,14 @@ use tungstenite::Message as WsMessage;
 
 use crate::audio::capture::AudioCapture;
 use crate::audio::playback::AudioPlayback;
-use crate::protocol::{encode_audio_frame, decode_audio_frame, AudioFrame, Message, StreamMode, CHANNELS, SAMPLE_RATE};
+use crate::protocol::{
+    decode_audio_frame, encode_audio_frame, AudioFrame, Message, StreamMode, CHANNELS, SAMPLE_RATE,
+};
 
-type WsSplitSink =
-    futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, WsMessage>;
+type WsSplitSink = futures_util::stream::SplitSink<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    WsMessage,
+>;
 
 pub async fn run_client(server_host: &str, port: u16, as_mic: bool) -> Result<()> {
     let url = format!("ws://{}:{}", server_host, port);
