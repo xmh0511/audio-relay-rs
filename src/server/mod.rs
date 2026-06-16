@@ -43,7 +43,7 @@ pub async fn run_server(host: &str, port: u16, web_port: u16) -> Result<()> {
     let listener = TcpListener::bind(&addr).await?;
     log::info!("Server listening on {}", addr);
 
-    let (broadcast_tx, _) = broadcast::channel::<Vec<u8>>(200);
+    let (broadcast_tx, _) = broadcast::channel::<Vec<u8>>(1000);
 
     let state = Arc::new(AppState {
         clients: Arc::new(RwLock::new(HashMap::new())),
@@ -336,7 +336,7 @@ async fn handle_connection(
                                                 }
                                             }
                                             Err(broadcast::error::RecvError::Lagged(n)) => {
-                                                log::warn!("Lagged {} messages", n);
+                                                log::debug!("Lagged {} messages", n);
                                             }
                                             Err(broadcast::error::RecvError::Closed) => break,
                                         }
