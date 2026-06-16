@@ -43,6 +43,9 @@ pub struct AppState {
 }
 
 pub async fn run_server(host: &str, port: u16, web_port: u16) -> Result<()> {
+    let detected_rate = crate::audio::capture::detect_sample_rate();
+    ACTUAL_SAMPLE_RATE.store(detected_rate, std::sync::atomic::Ordering::Relaxed);
+
     let addr = format!("{}:{}", host, port);
     let listener = TcpListener::bind(&addr).await?;
     log::info!("Server listening on {}", addr);
@@ -104,8 +107,6 @@ pub async fn run_server(host: &str, port: u16, web_port: u16) -> Result<()> {
         }
     });
 
-    let detected_rate = crate::audio::capture::detect_sample_rate();
-    ACTUAL_SAMPLE_RATE.store(detected_rate, std::sync::atomic::Ordering::Relaxed);
     replace_audio_capture(&state, detected_rate).await.ok();
 
     server_handle.await?;
