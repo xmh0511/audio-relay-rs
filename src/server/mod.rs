@@ -127,7 +127,6 @@ async fn start_audio_capture(state: Arc<AppState>) {
 }
 
 fn start_udp_broadcast(host: &str, port: u16, web_port: u16) {
-    let broadcast_addr = "255.255.255.255:8082";
     let service_info = serde_json::json!({
         "name": "AudioRelay",
         "ws_port": port,
@@ -136,10 +135,10 @@ fn start_udp_broadcast(host: &str, port: u16, web_port: u16) {
     .to_string();
 
     std::thread::spawn(move || {
-        let socket = match std::net::UdpSocket::bind("0.0.0.0:0") {
+        let socket = match std::net::UdpSocket::bind("0.0.0.0:8082") {
             Ok(s) => s,
             Err(e) => {
-                log::error!("Failed to bind UDP socket: {}", e);
+                log::error!("Failed to bind UDP socket on 8082: {}", e);
                 return;
             }
         };
@@ -147,13 +146,20 @@ fn start_udp_broadcast(host: &str, port: u16, web_port: u16) {
             .set_broadcast(true)
             .expect("Failed to set broadcast");
 
-        log::info!("UDP broadcast on {}", broadcast_addr);
+        log::info!("UDP discovery listener on port 8082");
 
+        let mut buf = [0u8; 1024];
         loop {
-            if let Err(e) = socket.send_to(service_info.as_bytes(), broadcast_addr) {
-                log::debug!("UDP broadcast error: {}", e);
+            match socket.recv_from(&mut buf) {
+                Ok((len, src)) => {
+                    let msg = String::from_utf8_lossy(&buf[..len]);
+                    log::info!("Discovery request from {}: {}", src, msg);
+                    let _ = socket.send_to(service_info.as_bytes(), src);
+                }
+                Err(e) => {
+                    log::debug!("UDP recv error: {}", e);
+                }
             }
-            std::thread::sleep(std::time::Duration::from_secs(3));
         }
     });
 }
