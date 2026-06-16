@@ -132,6 +132,7 @@ class AudioRelayService : Service() {
     private fun startPingJob() {
         pingJob?.cancel()
         pingJob = scope.launch {
+            sendPing()
             while (isActive) {
                 delay(15_000)
                 sendPing()
