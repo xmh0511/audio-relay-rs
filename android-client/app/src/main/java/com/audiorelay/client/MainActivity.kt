@@ -206,7 +206,7 @@ fun AudioRelayScreen() {
                     fontSize = 12.sp
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                discovery.discoveredList.forEach { server ->
+                discovery.discoveredList.toList().forEach { server ->
                     Surface(
                         onClick = {
                             serverHost = server.address

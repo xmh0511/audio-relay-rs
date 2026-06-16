@@ -1,6 +1,7 @@
 package com.audiorelay.client
 
 import android.util.Log
+import androidx.compose.runtime.mutableStateListOf
 import kotlinx.coroutines.*
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -78,10 +79,8 @@ class ServerDiscovery {
 
     private fun updateList() {
         val newList = servers.values.sortedBy { it.address }
-        with(MutableStateList::class) {
-            discoveredList.clear()
-            discoveredList.addAll(newList)
-        }
+        discoveredList.clear()
+        discoveredList.addAll(newList)
         Log.d("Discovery", "Server list updated: ${newList.size} servers")
     }
 }
