@@ -154,7 +154,7 @@ fn start_udp_broadcast(_host: &str, port: u16, web_port: u16) {
             match socket.recv_from(&mut buf) {
                 Ok((len, src)) => {
                     let msg = String::from_utf8_lossy(&buf[..len]);
-                    log::info!("Discovery request from {}: {}", src, msg);
+                    log::debug!("Discovery request from {}: {}", src, msg);
                     let _ = socket.send_to(service_info.as_bytes(), src);
                 }
                 Err(e) => {
