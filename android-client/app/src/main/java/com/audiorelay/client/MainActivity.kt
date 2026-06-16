@@ -148,6 +148,11 @@ fun AudioRelayScreen() {
 
             Text("Audio Relay", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Color.White)
 
+            Spacer(modifier = Modifier.height(4.dp))
+
+            Text("v${context.packageManager.getPackageInfo(context.packageName, 0).versionName}",
+                fontSize = 12.sp, color = Color.White.copy(alpha = 0.4f))
+
             Spacer(modifier = Modifier.height(8.dp))
 
             Text("Stream PC audio to your phone", fontSize = 14.sp, color = Color.White.copy(alpha = 0.6f))

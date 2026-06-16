@@ -49,7 +49,8 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Server { host, port, web_port } => {
-            log::info!("Starting AudioRelay Server on {}:{}", host, port);
+            log::info!("AudioRelay Server v{}", env!("CARGO_PKG_VERSION"));
+            log::info!("Starting on {}:{}", host, port);
             log::info!("Management UI at http://{}:{}", host, web_port);
             server::run_server(&host, port, web_port).await?;
         }
