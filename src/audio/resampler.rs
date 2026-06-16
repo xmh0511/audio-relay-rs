@@ -26,19 +26,18 @@ impl AudioResampler {
             interpolation: SincInterpolationType::Linear,
             window: WindowFunction::Hann,
         };
-
-        let resampler = SincFixedIn::<f64>::new(
-            source_rate as f64 / target_rate as f64,
-            2.0,
-            params,
-            chunk_size,
-            channels,
-        )
-        .map_err(|e| format!("Failed to create resampler: {:?}", e))?;
+        let ratio = target_rate as f64 / source_rate as f64;
+        let max_ratio_factor = ratio.max(1.0) * 2.0;
+        let resampler =
+            SincFixedIn::<f64>::new(ratio, max_ratio_factor, params, chunk_size, channels)
+                .map_err(|e| format!("Failed to create resampler: {:?}", e))?;
 
         log::info!(
             "Resampler created: {}Hz -> {}Hz, {}ch, chunk={}",
-            source_rate, target_rate, channels, chunk_size
+            source_rate,
+            target_rate,
+            channels,
+            chunk_size
         );
 
         Ok(Self {
