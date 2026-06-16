@@ -30,10 +30,10 @@ pub struct ClientEntry {
 
 pub struct AppState {
     pub clients: ClientInfo,
-    pub sample_rate: Arc<RwLock<u32>>,
     pub audio_capture: Arc<RwLock<Option<AudioCapture>>>,
     pub broadcast_tx: broadcast::Sender<Vec<u8>>,
     pub broadcast_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    pub restart_lock: Arc<Mutex<()>>,
 }
 
 pub async fn run_server(host: &str, port: u16, web_port: u16) -> Result<()> {
@@ -45,12 +45,10 @@ pub async fn run_server(host: &str, port: u16, web_port: u16) -> Result<()> {
 
     let state = Arc::new(AppState {
         clients: Arc::new(RwLock::new(HashMap::new())),
-        sample_rate: Arc::new(RwLock::new(
-            ACTUAL_SAMPLE_RATE.load(std::sync::atomic::Ordering::Relaxed),
-        )),
         audio_capture: Arc::new(RwLock::new(None)),
         broadcast_tx: broadcast_tx.clone(),
         broadcast_handle: Arc::new(Mutex::new(None)),
+        restart_lock: Arc::new(Mutex::new(())),
     });
 
     let web_state = state.clone();
@@ -127,6 +125,8 @@ async fn start_audio_capture(state: Arc<AppState>) {
 }
 
 async fn restart_audio_capture(state: &AppState, rate: u32) -> Result<()> {
+    let _guard = state.restart_lock.lock().await;
+
     let old = state.audio_capture.write().await.take();
     if let Some(mut c) = old {
         c.stop();
@@ -138,7 +138,6 @@ async fn restart_audio_capture(state: &AppState, rate: u32) -> Result<()> {
     }
 
     ACTUAL_SAMPLE_RATE.store(rate, std::sync::atomic::Ordering::Relaxed);
-    *state.sample_rate.write().await = rate;
 
     let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(200);
     let broadcast_tx = state.broadcast_tx.clone();
