@@ -1,15 +1,13 @@
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Stream, StreamConfig};
-use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
 
 pub struct AudioPlayback {
     _stream: Stream,
 }
 
 impl AudioPlayback {
-    pub fn new(rx: mpsc::Receiver<Vec<u8>>) -> Result<Self> {
+    pub fn new(rx: crossbeam_channel::Receiver<Vec<u8>>) -> Result<Self> {
         let host = cpal::default_host();
         let device = host
             .default_output_device()
@@ -35,25 +33,21 @@ impl AudioPlayback {
             buffer_size: cpal::BufferSize::Default,
         };
 
-        let rx = Arc::new(Mutex::new(rx));
-
         let stream = device
             .build_output_stream(
                 &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    if let Ok(mut receiver) = rx.lock() {
-                        match receiver.try_recv() {
-                            Ok(pcm_bytes) => {
-                                let samples = i16_bytes_to_float(&pcm_bytes);
-                                let len = data.len().min(samples.len());
-                                data[..len].copy_from_slice(&samples[..len]);
-                                if len < data.len() {
-                                    data[len..].fill(0.0);
-                                }
+                    match rx.try_recv() {
+                        Ok(pcm_bytes) => {
+                            let samples = i16_bytes_to_float(&pcm_bytes);
+                            let len = data.len().min(samples.len());
+                            data[..len].copy_from_slice(&samples[..len]);
+                            if len < data.len() {
+                                data[len..].fill(0.0);
                             }
-                            Err(_) => {
-                                data.fill(0.0);
-                            }
+                        }
+                        Err(_) => {
+                            data.fill(0.0);
                         }
                     }
                 },

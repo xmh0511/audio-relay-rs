@@ -2,7 +2,6 @@ mod audio;
 mod client;
 mod protocol;
 mod server;
-mod utils;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

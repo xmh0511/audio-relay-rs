@@ -9,6 +9,7 @@ pub struct AudioResampler {
     channels: usize,
     chunk_size: usize,
     input_buffer: Vec<Vec<f64>>,
+    temp_channels: Vec<Vec<f64>>,
 }
 
 impl AudioResampler {
@@ -47,6 +48,7 @@ impl AudioResampler {
             channels,
             chunk_size,
             input_buffer: vec![Vec::with_capacity(chunk_size * 2); channels],
+            temp_channels: vec![Vec::with_capacity(chunk_size); channels],
         })
     }
 
@@ -63,10 +65,16 @@ impl AudioResampler {
         let mut result = Vec::new();
 
         while self.input_buffer[0].len() >= self.chunk_size {
-            let channels_data: Vec<Vec<f64>> = self
-                .input_buffer
-                .iter_mut()
-                .map(|buf| buf.drain(..self.chunk_size).collect())
+            for (i, buf) in self.input_buffer.iter_mut().enumerate() {
+                self.temp_channels[i].clear();
+                self.temp_channels[i].extend_from_slice(&buf[..self.chunk_size]);
+                buf.drain(..self.chunk_size);
+            }
+
+            let channels_data: Vec<&[f64]> = self
+                .temp_channels
+                .iter()
+                .map(|buf| buf.as_slice())
                 .collect();
 
             let output = self
@@ -86,15 +94,5 @@ impl AudioResampler {
         }
 
         Ok(result)
-    }
-
-    #[allow(dead_code)]
-    pub fn source_rate(&self) -> u32 {
-        self.source_rate
-    }
-
-    #[allow(dead_code)]
-    pub fn target_rate(&self) -> u32 {
-        self.target_rate
     }
 }

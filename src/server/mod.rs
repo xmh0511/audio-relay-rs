@@ -11,7 +11,7 @@ use tokio_tungstenite::accept_async;
 use tungstenite::Message as WsMessage;
 
 use crate::audio::capture::AudioCapture;
-use crate::protocol::{timestamp_ms, Message, StreamMode, CHANNELS};
+use crate::protocol::{encode_audio_frame, decode_audio_frame, timestamp_ms, AudioFrame, Message, StreamMode, CHANNELS};
 
 pub static ACTUAL_SAMPLE_RATE: std::sync::atomic::AtomicU32 =
     std::sync::atomic::AtomicU32::new(44100);
@@ -57,7 +57,9 @@ pub async fn run_server(host: &str, port: u16, web_port: u16) -> Result<()> {
 
     let web_state = state.clone();
     tokio::spawn(async move {
-        start_web_server(web_port, web_state).await;
+        if let Err(e) = start_web_server(web_port, web_state).await {
+            log::error!("Web server error: {}", e);
+        }
     });
 
     let mut shutdown_rx = {
@@ -283,27 +285,26 @@ async fn handle_connection(
                                 loop {
                                     match broadcast_rx.recv().await {
                                         Ok((rate, data)) => {
-                                            let msg = Message::AudioData {
+                                            let frame = AudioFrame {
                                                 sequence: seq,
                                                 timestamp: timestamp_ms(),
                                                 sample_rate: rate,
                                                 data,
                                             };
                                             seq += 1;
-                                            if let Ok(json) = serde_json::to_string(&msg) {
-                                                let mut guard = speaker_sender.lock().await;
-                                                if let Some(sender) = guard.as_mut() {
-                                                    if sender
-                                                        .send(WsMessage::Text(json))
-                                                        .await
-                                                        .is_err()
-                                                    {
-                                                        log::info!(
-                                                            "Speaker {} disconnected",
-                                                            client_id_for_task
-                                                        );
-                                                        break;
-                                                    }
+                                            let binary = encode_audio_frame(&frame);
+                                            let mut guard = speaker_sender.lock().await;
+                                            if let Some(sender) = guard.as_mut() {
+                                                if sender
+                                                    .send(WsMessage::Binary(binary))
+                                                    .await
+                                                    .is_err()
+                                                {
+                                                    log::info!(
+                                                        "Speaker {} disconnected",
+                                                        client_id_for_task
+                                                    );
+                                                    break;
                                                 }
                                             }
                                         }
@@ -323,21 +324,12 @@ async fn handle_connection(
                     }
                 }
                 Some(Message::AudioData {
-                    sequence,
                     data,
                     sample_rate,
                     ..
                 }) => {
                     if client_mode == Some(StreamMode::Microphone) {
                         let _ = broadcast_tx.send((sample_rate, data));
-
-                        let ack = Message::AudioDataAck { sequence };
-                        if let Ok(ack_bytes) = serde_json::to_string(&ack) {
-                            let mut guard = ws_sender.lock().await;
-                            if let Some(sender) = guard.as_mut() {
-                                let _ = sender.send(WsMessage::Text(ack_bytes)).await;
-                            }
-                        }
                     }
                 }
                 Some(Message::Pong { timestamp }) => {
@@ -370,6 +362,13 @@ async fn handle_connection(
                     log::warn!("Invalid message from {}", addr);
                 }
             },
+            Ok(WsMessage::Binary(data)) => {
+                if client_mode == Some(StreamMode::Microphone) {
+                    if let Some(frame) = decode_audio_frame(&data) {
+                        let _ = broadcast_tx.send((frame.sample_rate, frame.data));
+                    }
+                }
+            }
             Ok(WsMessage::Close(_)) => {
                 log::info!("Client disconnected from {}", addr);
                 break;
@@ -394,7 +393,7 @@ async fn handle_connection(
     log::info!("Connection closed for {}", addr);
 }
 
-async fn start_web_server(port: u16, state: Arc<AppState>) {
+async fn start_web_server(port: u16, state: Arc<AppState>) -> Result<()> {
     let app = Router::new()
         .route("/", get(index_page))
         .route("/api/clients", get(get_clients))
@@ -407,8 +406,9 @@ async fn start_web_server(port: u16, state: Arc<AppState>) {
     let addr = format!("0.0.0.0:{}", port);
     log::info!("Management UI at http://{}", addr);
 
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
 }
 
 async fn index_page() -> axum::response::Html<&'static str> {

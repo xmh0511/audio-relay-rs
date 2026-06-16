@@ -196,6 +196,9 @@ fn capture_windows(
 
     log::info!("Loopback capture started");
 
+    let mut raw_chunk = vec![0u8; 4096 * blockalign];
+    let mut pcm_output = Vec::with_capacity(4096 * blockalign);
+
     loop {
         if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
             log::info!("Loopback capture stopping");
@@ -211,17 +214,19 @@ fn capture_windows(
         if frames_available > 0 {
             let frames_to_send = frames_available.min(4096);
             let bytes_to_send = frames_to_send * frame_size;
-            let mut raw_chunk = vec![0u8; bytes_to_send];
-            for byte in raw_chunk.iter_mut() {
+            raw_chunk.truncate(bytes_to_send);
+            raw_chunk.resize(bytes_to_send, 0);
+            for byte in raw_chunk.iter_mut().take(bytes_to_send) {
                 if let Some(b) = sample_queue.pop_front() {
                     *byte = b;
                 }
             }
 
-            let pcm_chunk = convert_to_i16_pcm(&raw_chunk, bits_per_sample, device_channels);
+            pcm_output.clear();
+            convert_to_i16_pcm(&raw_chunk[..bytes_to_send], bits_per_sample, device_channels, &mut pcm_output);
 
             let (send_rate, send_data) = if let Some(ref mut resampler) = resampler {
-                let i16_data: Vec<i16> = pcm_chunk
+                let i16_data: Vec<i16> = pcm_output
                     .chunks_exact(2)
                     .map(|c| i16::from_le_bytes([c[0], c[1]]))
                     .collect();
@@ -235,11 +240,11 @@ fn capture_windows(
                     }
                     Err(e) => {
                         log::warn!("Resample error: {}", e);
-                        (device_sample_rate, pcm_chunk)
+                        (device_sample_rate, pcm_output.clone())
                     }
                 }
             } else {
-                (device_sample_rate, pcm_chunk)
+                (device_sample_rate, pcm_output.clone())
             };
 
             if tx.try_send((send_rate, send_data)).is_err() {
@@ -255,7 +260,7 @@ fn capture_windows(
 }
 
 #[cfg(target_os = "windows")]
-fn convert_to_i16_pcm(raw: &[u8], bits_per_sample: usize, channels: usize) -> Vec<u8> {
+fn convert_to_i16_pcm(raw: &[u8], bits_per_sample: usize, channels: usize, output: &mut Vec<u8>) {
     match bits_per_sample {
         32 => {
             let float_count = raw.len() / 4;
@@ -264,7 +269,7 @@ fn convert_to_i16_pcm(raw: &[u8], bits_per_sample: usize, channels: usize) -> Ve
 
             if channels == 2 {
                 let mono_count = float_count / 2;
-                let mut output = Vec::with_capacity(mono_count * 2);
+                output.reserve(mono_count * 2 - output.len());
                 for i in 0..mono_count {
                     let left = floats[i * 2];
                     let right = floats[i * 2 + 1];
@@ -272,14 +277,12 @@ fn convert_to_i16_pcm(raw: &[u8], bits_per_sample: usize, channels: usize) -> Ve
                     let sample = (mixed.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
                     output.extend_from_slice(&sample.to_le_bytes());
                 }
-                output
             } else {
-                let mut output = Vec::with_capacity(float_count * 2);
+                output.reserve(float_count * 2 - output.len());
                 for &f in floats {
                     let sample = (f.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
                     output.extend_from_slice(&sample.to_le_bytes());
                 }
-                output
             }
         }
         16 => {
@@ -288,19 +291,20 @@ fn convert_to_i16_pcm(raw: &[u8], bits_per_sample: usize, channels: usize) -> Ve
                 let samples =
                     unsafe { std::slice::from_raw_parts(raw.as_ptr() as *const i16, sample_count) };
                 let mono_count = sample_count / 2;
-                let mut output = Vec::with_capacity(mono_count * 2);
+                output.reserve(mono_count * 2 - output.len());
                 for i in 0..mono_count {
                     let left = samples[i * 2] as i32;
                     let right = samples[i * 2 + 1] as i32;
                     let mixed = ((left + right) / 2) as i16;
                     output.extend_from_slice(&mixed.to_le_bytes());
                 }
-                output
             } else {
-                raw.to_vec()
+                output.extend_from_slice(raw);
             }
         }
-        _ => raw.to_vec(),
+        _ => {
+            output.extend_from_slice(raw);
+        }
     }
 }
 
@@ -383,12 +387,15 @@ fn capture_cpal(
 
     log::info!("Audio capture started: {}Hz, {} ch", device_rate, channels);
 
+    let mut pcm_output = Vec::with_capacity(4096 * channels * 2);
+
     while !stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
         match raw_rx.recv_timeout(std::time::Duration::from_millis(100)) {
             Ok(float_data) => {
-                let pcm_data = float_to_i16_bytes(&float_data);
+                pcm_output.clear();
+                float_to_i16_bytes(&float_data, &mut pcm_output);
                 let (send_rate, send_data) = if let Some(ref mut resampler) = resampler {
-                    let i16_data: Vec<i16> = pcm_data
+                    let i16_data: Vec<i16> = pcm_output
                         .chunks_exact(2)
                         .map(|c| i16::from_le_bytes([c[0], c[1]]))
                         .collect();
@@ -402,11 +409,11 @@ fn capture_cpal(
                         }
                         Err(e) => {
                             log::warn!("Resample error: {}", e);
-                            (device_rate, pcm_data)
+                            (device_rate, pcm_output.clone())
                         }
                     }
                 } else {
-                    (device_rate, pcm_data)
+                    (device_rate, pcm_output.clone())
                 };
                 if tx.try_send((send_rate, send_data)).is_err() {
                     log::warn!("Audio channel full, dropping frame");
@@ -423,12 +430,11 @@ fn capture_cpal(
 }
 
 #[cfg(not(target_os = "windows"))]
-fn float_to_i16_bytes(samples: &[f32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(samples.len() * 2);
+fn float_to_i16_bytes(samples: &[f32], output: &mut Vec<u8>) {
+    output.reserve(samples.len() * 2 - output.len());
     for &s in samples {
         let clamped = s.clamp(-1.0, 1.0);
         let val = (clamped * i16::MAX as f32) as i16;
-        bytes.extend_from_slice(&val.to_le_bytes());
+        output.extend_from_slice(&val.to_le_bytes());
     }
-    bytes
 }

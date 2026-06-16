@@ -20,7 +20,6 @@ import kotlinx.coroutines.*
 import okhttp3.*
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import org.json.JSONArray
 import org.json.JSONObject
 
 class AudioRelayService : Service() {
@@ -111,6 +110,14 @@ class AudioRelayService : Service() {
                 }
             }
 
+            override fun onMessage(webSocket: WebSocket, bytes: okio.ByteString) {
+                try {
+                    handleBinaryMessage(bytes)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error parsing binary message: ${e.message}", e)
+                }
+            }
+
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                 Log.d(TAG, "WebSocket closing: $code $reason")
                 webSocket.close(1000, null)
@@ -167,18 +174,6 @@ class AudioRelayService : Service() {
                 updateNotification("Streaming audio…")
                 updateState(ServiceState.STREAMING)
             }
-            json.has("AudioData") -> {
-                val audioData = json.getJSONObject("AudioData")
-                val data = audioData.getJSONArray("data")
-                val sequence = audioData.optLong("sequence", 0)
-                val sampleRate = audioData.optInt("sample_rate", currentSampleRate)
-                if (sampleRate != currentSampleRate) {
-                    Log.d(TAG, "Sample rate changed: ${currentSampleRate}Hz -> ${sampleRate}Hz")
-                    currentSampleRate = sampleRate
-                    initAudioTrack(sampleRate)
-                }
-                playAudio(data, sequence)
-            }
             json.has("Pong") -> {
                 val pongJson = json.getJSONObject("Pong")
                 val sentTimestamp = pongJson.optLong("timestamp", 0)
@@ -202,6 +197,24 @@ class AudioRelayService : Service() {
                 webSocket?.send(pong.toString())
             }
         }
+    }
+
+    private fun handleBinaryMessage(bytes: okio.ByteString) {
+        val buffer = bytes.toByteArray()
+        if (buffer.size < 20) return
+
+        val sequence = java.nio.ByteBuffer.wrap(buffer, 0, 8).order(java.nio.ByteOrder.LITTLE_ENDIAN).long
+        val timestamp = java.nio.ByteBuffer.wrap(buffer, 8, 8).order(java.nio.ByteOrder.LITTLE_ENDIAN).long
+        val sampleRate = java.nio.ByteBuffer.wrap(buffer, 16, 4).order(java.nio.ByteOrder.LITTLE_ENDIAN).int
+        val pcmData = buffer.copyOfRange(20, buffer.size)
+
+        if (sampleRate != currentSampleRate) {
+            Log.d(TAG, "Sample rate changed: ${currentSampleRate}Hz -> ${sampleRate}Hz")
+            currentSampleRate = sampleRate
+            initAudioTrack(sampleRate)
+        }
+
+        playBinaryAudio(pcmData, sequence)
     }
 
     private fun initAudioTrack(serverSampleRate: Int) {
@@ -235,13 +248,8 @@ class AudioRelayService : Service() {
         Log.d(TAG, "AudioTrack initialized: ${serverSampleRate}Hz, buffer=$bufferSize")
     }
 
-    private fun playAudio(dataArray: JSONArray, sequence: Long) {
+    private fun playBinaryAudio(bytes: ByteArray, sequence: Long) {
         try {
-            val bytes = ByteArray(dataArray.length())
-            for (i in 0 until dataArray.length()) {
-                bytes[i] = dataArray.getInt(i).toByte()
-            }
-
             audioTrack?.write(bytes, 0, bytes.size)
 
             var sum = 0L
