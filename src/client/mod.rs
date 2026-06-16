@@ -6,7 +6,7 @@ use tungstenite::Message as WsMessage;
 
 use crate::audio::capture::AudioCapture;
 use crate::audio::playback::AudioPlayback;
-use crate::protocol::{Message, StreamMode, SAMPLE_RATE, CHANNELS};
+use crate::protocol::{Message, StreamMode, CHANNELS, SAMPLE_RATE};
 
 pub async fn run_client(server_host: &str, port: u16, as_mic: bool) -> Result<()> {
     let url = format!("ws://{}:{}", server_host, port);
@@ -53,7 +53,7 @@ pub async fn run_client(server_host: &str, port: u16, as_mic: bool) -> Result<()
             log::info!("Starting in microphone mode");
             let (tx, mut rx) = mpsc::channel::<(u32, Vec<u8>)>(50);
 
-            let _capture = AudioCapture::new(tx)
+            let _capture = AudioCapture::new(tx, crate::protocol::SAMPLE_RATE)
                 .context("Failed to initialize audio capture")?;
 
             let mut audio_seq: u64 = 0;
@@ -88,8 +88,8 @@ pub async fn run_client(server_host: &str, port: u16, as_mic: bool) -> Result<()
             log::info!("Starting in speaker mode");
 
             let (audio_tx, audio_rx) = mpsc::channel::<Vec<u8>>(50);
-            let _playback = AudioPlayback::new(audio_rx)
-                .context("Failed to initialize audio playback")?;
+            let _playback =
+                AudioPlayback::new(audio_rx).context("Failed to initialize audio playback")?;
 
             let audio_tx = audio_tx;
 
@@ -99,9 +99,15 @@ pub async fn run_client(server_host: &str, port: u16, as_mic: bool) -> Result<()
                     match msg {
                         Ok(WsMessage::Text(text)) => {
                             match Message::from_json_bytes(text.as_bytes()) {
-                                Some(Message::AudioData { data, sample_rate, .. }) => {
+                                Some(Message::AudioData {
+                                    data, sample_rate, ..
+                                }) => {
                                     if sample_rate != current_sample_rate {
-                                        log::info!("Sample rate changed: {}Hz -> {}Hz", current_sample_rate, sample_rate);
+                                        log::info!(
+                                            "Sample rate changed: {}Hz -> {}Hz",
+                                            current_sample_rate,
+                                            sample_rate
+                                        );
                                         current_sample_rate = sample_rate;
                                     }
                                     let _ = audio_tx.send(data).await;

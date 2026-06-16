@@ -48,17 +48,17 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Server { host, port, web_port } => {
+        Commands::Server {
+            host,
+            port,
+            web_port,
+        } => {
             log::info!("AudioRelay Server v{}", env!("CARGO_PKG_VERSION"));
             log::info!("Starting on {}:{}", host, port);
             log::info!("Management UI at http://{}:{}", host, web_port);
             server::run_server(&host, port, web_port).await?;
         }
-        Commands::Client {
-            server,
-            port,
-            mode,
-        } => {
+        Commands::Client { server, port, mode } => {
             let mode_str = match mode {
                 ClientMode::Speaker => "speaker",
                 ClientMode::Mic => "mic",

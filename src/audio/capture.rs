@@ -31,7 +31,7 @@ pub struct AudioCapture {
 }
 
 impl AudioCapture {
-    pub fn new(tx: mpsc::Sender<(u32, Vec<u8>)>) -> Result<Self> {
+    pub fn new(tx: mpsc::Sender<(u32, Vec<u8>)>, target_rate: u32) -> Result<Self> {
         let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = stop_flag.clone();
         let (stopped_tx, stopped_rx) = oneshot::channel::<()>();
@@ -40,9 +40,9 @@ impl AudioCapture {
             .name("audio-capture".to_string())
             .spawn(move || {
                 #[cfg(target_os = "windows")]
-                capture_windows(tx, flag, stopped_tx);
+                capture_windows(tx, flag, stopped_tx, target_rate);
                 #[cfg(not(target_os = "windows"))]
-                capture_cpal(tx, flag, stopped_tx);
+                capture_cpal(tx, flag, stopped_tx, target_rate);
             })?;
 
         Ok(Self {
@@ -69,6 +69,7 @@ fn capture_windows(
     tx: mpsc::Sender<(u32, Vec<u8>)>,
     stop_flag: Arc<std::sync::atomic::AtomicBool>,
     stopped_tx: oneshot::Sender<()>,
+    target_rate: u32,
 ) {
     use std::collections::VecDeque;
     use wasapi::*;
@@ -168,10 +169,22 @@ fn capture_windows(
         buffer_frame_count
     );
 
-    crate::server::ACTUAL_SAMPLE_RATE.store(
-        device_sample_rate,
-        std::sync::atomic::Ordering::Relaxed,
-    );
+    let mut resampler = if device_sample_rate != target_rate {
+        log::info!("Resampling {}Hz -> {}Hz", device_sample_rate, target_rate);
+        match crate::audio::resampler::AudioResampler::new(
+            device_sample_rate,
+            target_rate,
+            device_channels,
+        ) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                log::error!("Failed to create resampler: {}, sending at device rate", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let mut sample_queue: VecDeque<u8> =
         VecDeque::with_capacity(blockalign * buffer_frame_count as usize * 4);
@@ -207,7 +220,29 @@ fn capture_windows(
 
             let pcm_chunk = convert_to_i16_pcm(&raw_chunk, bits_per_sample, device_channels);
 
-            if tx.try_send((device_sample_rate, pcm_chunk)).is_err() {
+            let (send_rate, send_data) = if let Some(ref mut resampler) = resampler {
+                let i16_data: Vec<i16> = pcm_chunk
+                    .chunks_exact(2)
+                    .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                    .collect();
+                match resampler.resample(&i16_data) {
+                    Ok(resampled) => {
+                        let mut bytes = Vec::with_capacity(resampled.len() * 2);
+                        for s in resampled {
+                            bytes.extend_from_slice(&s.to_le_bytes());
+                        }
+                        (target_rate, bytes)
+                    }
+                    Err(e) => {
+                        log::warn!("Resample error: {}", e);
+                        (device_sample_rate, pcm_chunk)
+                    }
+                }
+            } else {
+                (device_sample_rate, pcm_chunk)
+            };
+
+            if tx.try_send((send_rate, send_data)).is_err() {
                 log::warn!("Audio channel full, dropping frame");
             }
         }
@@ -250,9 +285,8 @@ fn convert_to_i16_pcm(raw: &[u8], bits_per_sample: usize, channels: usize) -> Ve
         16 => {
             if channels == 2 {
                 let sample_count = raw.len() / 2;
-                let samples = unsafe {
-                    std::slice::from_raw_parts(raw.as_ptr() as *const i16, sample_count)
-                };
+                let samples =
+                    unsafe { std::slice::from_raw_parts(raw.as_ptr() as *const i16, sample_count) };
                 let mono_count = sample_count / 2;
                 let mut output = Vec::with_capacity(mono_count * 2);
                 for i in 0..mono_count {
@@ -275,6 +309,7 @@ fn capture_cpal(
     tx: mpsc::Sender<(u32, Vec<u8>)>,
     stop_flag: Arc<std::sync::atomic::AtomicBool>,
     stopped_tx: oneshot::Sender<()>,
+    target_rate: u32,
 ) {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -300,27 +335,34 @@ fn capture_cpal(
         }
     };
 
-    let sample_rate = supported.sample_rate().0;
-    let channels = supported.channels();
+    let device_rate = supported.sample_rate().0;
+    let channels = supported.channels() as usize;
 
-    crate::server::ACTUAL_SAMPLE_RATE.store(
-        sample_rate,
-        std::sync::atomic::Ordering::Relaxed,
-    );
+    let mut resampler = if device_rate != target_rate {
+        log::info!("Resampling {}Hz -> {}Hz", device_rate, target_rate);
+        match crate::audio::resampler::AudioResampler::new(device_rate, target_rate, channels) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                log::error!("Failed to create resampler: {}, sending at device rate", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let (raw_tx, mut raw_rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(10);
 
     let config = cpal::StreamConfig {
-        channels,
-        sample_rate: cpal::SampleRate(sample_rate),
+        channels: supported.channels(),
+        sample_rate: cpal::SampleRate(device_rate),
         buffer_size: cpal::BufferSize::Default,
     };
 
     let stream = match device.build_input_stream(
         &config,
         move |data: &[f32], _: &cpal::InputCallbackInfo| {
-            let pcm_data = float_to_i16_bytes(data);
-            if tx.try_send((sample_rate, pcm_data)).is_err() {
-                log::warn!("Audio channel full, dropping frame");
-            }
+            let _ = raw_tx.try_send(data.to_vec());
         },
         |err| {
             log::error!("Capture error: {}", err);
@@ -339,15 +381,34 @@ fn capture_cpal(
         return;
     }
 
-    log::info!("Audio capture started: {}Hz, {} ch", sample_rate, channels);
+    log::info!("Audio capture started: {}Hz, {} ch", device_rate, channels);
 
     while !stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        match raw_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(float_data) => {
+                let pcm_data = float_to_i16_bytes(&float_data);
+                let (send_rate, send_data) = if let Some(ref mut resampler) = resampler {
+                    match resampler.resample(&pcm_data) {
+                        Ok(resampled) => (target_rate, resampled),
+                        Err(e) => {
+                            log::warn!("Resample error: {}", e);
+                            (device_rate, pcm_data)
+                        }
+                    }
+                } else {
+                    (device_rate, pcm_data)
+                };
+                if tx.try_send((send_rate, send_data)).is_err() {
+                    log::warn!("Audio channel full, dropping frame");
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
     }
 
-    log::info!("Capture stopping");
-    drop(stream);
     log::info!("Capture stopped");
+    drop(stream);
     notifier.done();
 }
 

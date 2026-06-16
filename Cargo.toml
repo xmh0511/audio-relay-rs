@@ -19,6 +19,7 @@ uuid = { version = "1.4", features = ["v4"] }
 ctrlc = "3.4"
 axum = "0.7"
 tower-http = { version = "0.5", features = ["cors"] }
+rubato = "0.14"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wasapi = "0.16"

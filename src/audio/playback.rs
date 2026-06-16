@@ -4,8 +4,6 @@ use cpal::{Stream, StreamConfig};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
-
-
 pub struct AudioPlayback {
     _stream: Stream,
 }
@@ -66,9 +64,7 @@ impl AudioPlayback {
             )
             .context("Failed to build output stream")?;
 
-        stream
-            .play()
-            .context("Failed to start playback stream")?;
+        stream.play().context("Failed to start playback stream")?;
 
         Ok(Self { _stream: stream })
     }
