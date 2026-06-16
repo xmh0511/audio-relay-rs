@@ -4,7 +4,6 @@ import android.util.Log
 import kotlinx.coroutines.*
 import java.net.DatagramPacket
 import java.net.DatagramSocket
-import java.net.InetAddress
 import org.json.JSONObject
 
 data class DiscoveredServer(
@@ -18,15 +17,15 @@ data class DiscoveredServer(
 class ServerDiscovery {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val servers = mutableMapOf<String, DiscoveredServer>()
-    var onServersUpdated: ((List<DiscoveredServer>) -> Unit)? = null
+    val discoveredList = mutableStateListOf<DiscoveredServer>()
 
     fun startListening() {
         scope.launch {
             val socket = DatagramSocket(8082)
-            socket.soTimeout = 5000
+            socket.soTimeout = 3000
             val buffer = ByteArray(1024)
 
-            Log.d("Discovery", "Listening for server broadcasts on port 8082")
+            Log.d("Discovery", "Listening on port 8082")
 
             while (isActive) {
                 try {
@@ -34,6 +33,8 @@ class ServerDiscovery {
                     socket.receive(packet)
                     val data = String(packet.data, 0, packet.length)
                     val address = packet.address.hostAddress ?: continue
+
+                    Log.d("Discovery", "Received from $address: $data")
 
                     val json = JSONObject(data)
                     val wsPort = json.optInt("ws_port", 8080)
@@ -49,10 +50,7 @@ class ServerDiscovery {
                         lastSeen = System.currentTimeMillis()
                     )
 
-                    Log.d("Discovery", "Found server: $address:$wsPort")
-                    withContext(Dispatchers.Main) {
-                        onServersUpdated?.invoke(getServers())
-                    }
+                    updateList()
                 } catch (e: java.net.SocketTimeoutException) {
                     cleanupOldServers()
                 } catch (e: Exception) {
@@ -72,14 +70,18 @@ class ServerDiscovery {
     private fun cleanupOldServers() {
         val now = System.currentTimeMillis()
         val before = servers.size
-        servers.entries.removeIf { now - it.value.lastSeen > 15000 }
+        servers.entries.removeIf { now - it.value.lastSeen > 10000 }
         if (servers.size != before) {
-            Log.d("Discovery", "Cleaned up ${before - servers.size} old servers")
+            updateList()
         }
     }
 
-    fun getServers(): List<DiscoveredServer> {
-        cleanupOldServers()
-        return servers.values.sortedBy { it.address }
+    private fun updateList() {
+        val newList = servers.values.sortedBy { it.address }
+        with(MutableStateList::class) {
+            discoveredList.clear()
+            discoveredList.addAll(newList)
+        }
+        Log.d("Discovery", "Server list updated: ${newList.size} servers")
     }
 }

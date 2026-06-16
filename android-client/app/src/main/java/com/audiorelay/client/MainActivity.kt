@@ -95,16 +95,11 @@ fun AudioRelayScreen() {
     var audioLevel by remember { mutableFloatStateOf(0f) }
     var latency by remember { mutableFloatStateOf(0f) }
     var avgLatency by remember { mutableFloatStateOf(0f) }
-    var discoveredServers by remember { mutableStateOf<List<DiscoveredServer>>(emptyList()) }
-    var showServerList by remember { mutableStateOf(false) }
     val context = LocalContext.current
 
     val discovery = remember { ServerDiscovery() }
 
     DisposableEffect(Unit) {
-        discovery.onServersUpdated = { servers ->
-            discoveredServers = servers
-        }
         discovery.startListening()
         onDispose {
             discovery.stopListening()
@@ -203,7 +198,7 @@ fun AudioRelayScreen() {
                 singleLine = true
             )
 
-            if (discoveredServers.isNotEmpty() && !isPlaying) {
+            if (discovery.discoveredList.isNotEmpty() && !isPlaying) {
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
                     text = "Discovered Servers",
@@ -211,7 +206,7 @@ fun AudioRelayScreen() {
                     fontSize = 12.sp
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                discoveredServers.forEach { server ->
+                discovery.discoveredList.forEach { server ->
                     Surface(
                         onClick = {
                             serverHost = server.address
