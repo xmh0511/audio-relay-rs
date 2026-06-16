@@ -388,8 +388,18 @@ fn capture_cpal(
             Ok(float_data) => {
                 let pcm_data = float_to_i16_bytes(&float_data);
                 let (send_rate, send_data) = if let Some(ref mut resampler) = resampler {
-                    match resampler.resample(&pcm_data) {
-                        Ok(resampled) => (target_rate, resampled),
+                    let i16_data: Vec<i16> = pcm_data
+                        .chunks_exact(2)
+                        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                        .collect();
+                    match resampler.resample(&i16_data) {
+                        Ok(resampled) => {
+                            let mut bytes = Vec::with_capacity(resampled.len() * 2);
+                            for s in resampled {
+                                bytes.extend_from_slice(&s.to_le_bytes());
+                            }
+                            (target_rate, bytes)
+                        }
                         Err(e) => {
                             log::warn!("Resample error: {}", e);
                             (device_rate, pcm_data)
