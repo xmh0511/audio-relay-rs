@@ -25,8 +25,7 @@ class ServerDiscovery {
         scope.launch {
             while (isActive) {
                 try {
-                    sendDiscoveryRequest()
-                    listenForResponse()
+                    discover()
                 } catch (e: Exception) {
                     if (isActive) {
                         Log.e("Discovery", "Error: ${e.message}")
@@ -37,37 +36,25 @@ class ServerDiscovery {
         }
     }
 
-    private suspend fun sendDiscoveryRequest() {
+    private suspend fun discover() {
         withContext(Dispatchers.IO) {
-            try {
-                val socket = DatagramSocket()
-                socket.soTimeout = 2000
-                socket.broadcast = true
+            val socket = DatagramSocket()
+            socket.soTimeout = 2000
+            socket.broadcast = true
 
+            try {
                 val msg = "DISCOVER_AUDIO_RELAY".toByteArray()
                 val broadcast = InetAddress.getByName("255.255.255.255")
-                val packet = DatagramPacket(msg, msg.size, broadcast, 8082)
-                socket.send(packet)
-
+                val sendPacket = DatagramPacket(msg, msg.size, broadcast, 8082)
+                socket.send(sendPacket)
                 Log.d("Discovery", "Sent discovery request")
-                socket.close()
-            } catch (e: Exception) {
-                Log.e("Discovery", "Send error: ${e.message}")
-            }
-        }
-    }
 
-    private suspend fun listenForResponse() {
-        withContext(Dispatchers.IO) {
-            try {
-                val socket = DatagramSocket()
-                socket.soTimeout = 2000
                 val buffer = ByteArray(1024)
-                val packet = DatagramPacket(buffer, buffer.size)
+                val recvPacket = DatagramPacket(buffer, buffer.size)
+                socket.receive(recvPacket)
 
-                socket.receive(packet)
-                val data = String(packet.data, 0, packet.length)
-                val address = packet.address.hostAddress ?: return@withContext
+                val data = String(recvPacket.data, 0, recvPacket.length)
+                val address = recvPacket.address.hostAddress ?: return@withContext
 
                 Log.d("Discovery", "Response from $address: $data")
 
@@ -88,12 +75,10 @@ class ServerDiscovery {
                 withContext(Dispatchers.Main) {
                     updateList()
                 }
-
-                socket.close()
             } catch (e: java.net.SocketTimeoutException) {
-                // No response, try next time
-            } catch (e: Exception) {
-                Log.e("Discovery", "Receive error: ${e.message}")
+                Log.d("Discovery", "No response within timeout")
+            } finally {
+                socket.close()
             }
         }
     }
