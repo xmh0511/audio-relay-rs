@@ -370,9 +370,8 @@ fn capture_windows(
                 }
             } else {
                 pcm_output.clear();
-                convert_to_i16_pcm(
+                f32_to_i16_pcm(
                     &raw_chunk[..bytes_to_send],
-                    bits_per_sample,
                     device_channels,
                     &mut pcm_output,
                 );
@@ -403,8 +402,9 @@ fn capture_windows(
                 }
             }
 
-            if tx.try_send((send_rate, send_data)).is_err() {
-                log::warn!("Audio channel full, dropping frame");
+            if let Err(e) = tx.try_send((send_rate, send_data)) {
+                log::warn!("Audio channel send failed: {}, stopping capture", e);
+                break;
             }
         }
 
@@ -416,56 +416,25 @@ fn capture_windows(
 }
 
 #[cfg(target_os = "windows")]
-fn convert_to_i16_pcm(raw: &[u8], bits_per_sample: usize, channels: usize, output: &mut Vec<u8>) {
-    match bits_per_sample {
-        32 => {
-            let float_count = raw.len() / 4;
-            let floats =
-                unsafe { std::slice::from_raw_parts(raw.as_ptr() as *const f32, float_count) };
+fn f32_to_i16_pcm(raw: &[u8], channels: usize, output: &mut Vec<u8>) {
+    let float_count = raw.len() / 4;
+    let floats = unsafe { std::slice::from_raw_parts(raw.as_ptr() as *const f32, float_count) };
 
-            if channels == 2 {
-                let mono_count = float_count / 2;
-                output.reserve(mono_count * 2 - output.len());
-                for i in 0..mono_count {
-                    let left = floats[i * 2];
-                    let right = floats[i * 2 + 1];
-                    let mixed = (left + right) / 2.0;
-                    let sample = (mixed.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-                    output.extend_from_slice(&sample.to_le_bytes());
-                }
-            } else {
-                output.reserve(float_count * 2 - output.len());
-                for &f in floats {
-                    let sample = (f.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-                    output.extend_from_slice(&sample.to_le_bytes());
-                }
-            }
+    if channels == 2 {
+        let mono_count = float_count / 2;
+        output.reserve(mono_count * 2 - output.len());
+        for i in 0..mono_count {
+            let left = floats[i * 2];
+            let right = floats[i * 2 + 1];
+            let mixed = (left + right) / 2.0;
+            let sample = (mixed.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+            output.extend_from_slice(&sample.to_le_bytes());
         }
-        16 => {
-            if channels == 2 {
-                let sample_count = raw.len() / 2;
-                let samples =
-                    unsafe { std::slice::from_raw_parts(raw.as_ptr() as *const i16, sample_count) };
-                let mono_count = sample_count / 2;
-                output.reserve(mono_count * 2 - output.len());
-                for i in 0..mono_count {
-                    let left = samples[i * 2] as i32;
-                    let right = samples[i * 2 + 1] as i32;
-                    let mixed = ((left + right) / 2) as i16;
-                    output.extend_from_slice(&mixed.to_le_bytes());
-                }
-            } else {
-                let sample_count = raw.len() / 2;
-                let samples =
-                    unsafe { std::slice::from_raw_parts(raw.as_ptr() as *const i16, sample_count) };
-                output.reserve(sample_count * 2 - output.len());
-                for &s in samples {
-                    output.extend_from_slice(&s.to_le_bytes());
-                }
-            }
-        }
-        _ => {
-            output.extend_from_slice(raw);
+    } else {
+        output.reserve(float_count * 2 - output.len());
+        for &f in floats {
+            let sample = (f.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+            output.extend_from_slice(&sample.to_le_bytes());
         }
     }
 }

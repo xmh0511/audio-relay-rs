@@ -27,8 +27,55 @@ pub struct ClientEntry {
     pub mode: StreamMode,
     pub latency_ms: f64,
     pub connected_at: u64,
+    pub bytes_up: u64,
+    pub bytes_down: u64,
+    pub last_speed_calc: u64,
+    pub bytes_up_snapshot: u64,
+    pub bytes_down_snapshot: u64,
+    pub speed_up: f64,
+    pub speed_down: f64,
     #[allow(dead_code)]
     pub ws_sender: Arc<Mutex<Option<WsSplitSink>>>,
+}
+
+impl ClientEntry {
+    pub fn new(
+        client_id: String,
+        addr: SocketAddr,
+        mode: StreamMode,
+        ws_sender: Arc<Mutex<Option<WsSplitSink>>>,
+    ) -> Self {
+        let now = crate::protocol::timestamp_ms();
+        Self {
+            client_id,
+            addr,
+            mode,
+            latency_ms: 0.0,
+            connected_at: now,
+            bytes_up: 0,
+            bytes_down: 0,
+            last_speed_calc: now,
+            bytes_up_snapshot: 0,
+            bytes_down_snapshot: 0,
+            speed_up: 0.0,
+            speed_down: 0.0,
+            ws_sender,
+        }
+    }
+
+    pub fn update_speed(&mut self) {
+        let now = crate::protocol::timestamp_ms();
+        let elapsed = now.saturating_sub(self.last_speed_calc);
+        if elapsed >= 1000 {
+            self.speed_up =
+                (self.bytes_up - self.bytes_up_snapshot) as f64 / elapsed as f64 * 1000.0;
+            self.speed_down =
+                (self.bytes_down - self.bytes_down_snapshot) as f64 / elapsed as f64 * 1000.0;
+            self.bytes_up_snapshot = self.bytes_up;
+            self.bytes_down_snapshot = self.bytes_down;
+            self.last_speed_calc = now;
+        }
+    }
 }
 
 pub struct AudioCaptureState {
@@ -117,9 +164,9 @@ async fn replace_audio_capture(state: &AppState, target_rate: u32) -> Result<()>
     let mut guard = state.audio_capture.lock().await;
 
     if let Some(mut old) = guard.take() {
+        old.broadcast_handle.abort();
         old.capture.stop();
         old.capture.wait_stopped().await;
-        old.broadcast_handle.abort();
     }
 
     ACTUAL_SAMPLE_RATE.store(target_rate, std::sync::atomic::Ordering::Relaxed);
@@ -232,139 +279,156 @@ async fn handle_connection(
 
     while let Some(msg) = ws_receiver.next().await {
         match msg {
-            Ok(WsMessage::Text(text)) => match Message::from_json_bytes(text.as_bytes()) {
-                Some(Message::Hello {
-                    client_id: id,
-                    mode,
-                    sample_rate,
-                    channels,
-                }) => {
-                    log::info!(
-                        "Client {} connected, mode: {:?}, {}Hz, {}ch",
-                        id,
+            Ok(WsMessage::Text(text)) => {
+                let msg_len = text.len() as u64;
+                if let Some(ref id) = client_id {
+                    if let Some(entry) = clients.write().await.get_mut(id) {
+                        entry.bytes_up += msg_len;
+                    }
+                }
+                match Message::from_json_bytes(text.as_bytes()) {
+                    Some(Message::Hello {
+                        client_id: id,
                         mode,
                         sample_rate,
-                        channels
-                    );
+                        channels,
+                    }) => {
+                        log::info!(
+                            "Client {} connected, mode: {:?}, {}Hz, {}ch",
+                            id,
+                            mode,
+                            sample_rate,
+                            channels
+                        );
 
-                    let actual_rate = ACTUAL_SAMPLE_RATE.load(std::sync::atomic::Ordering::Relaxed);
+                        let actual_rate =
+                            ACTUAL_SAMPLE_RATE.load(std::sync::atomic::Ordering::Relaxed);
 
-                    let session_id = uuid::Uuid::new_v4().to_string();
-                    let ack = Message::HelloAck {
-                        session_id,
-                        sample_rate: actual_rate,
-                        channels: CHANNELS,
-                    };
+                        let session_id = uuid::Uuid::new_v4().to_string();
+                        let ack = Message::HelloAck {
+                            session_id,
+                            sample_rate: actual_rate,
+                            channels: CHANNELS,
+                        };
 
-                    if let Ok(ack_bytes) = serde_json::to_string(&ack) {
-                        let mut guard = ws_sender.lock().await;
-                        if let Some(sender) = guard.as_mut() {
-                            let _ = sender.send(WsMessage::Text(ack_bytes)).await;
+                        if let Ok(ack_bytes) = serde_json::to_string(&ack) {
+                            let mut guard = ws_sender.lock().await;
+                            if let Some(sender) = guard.as_mut() {
+                                let _ = sender.send(WsMessage::Text(ack_bytes)).await;
+                            }
                         }
-                    }
 
-                    clients.write().await.insert(
-                        id.clone(),
-                        ClientEntry {
-                            client_id: id.clone(),
-                            addr,
-                            mode: mode.clone(),
-                            latency_ms: 0.0,
-                            connected_at: timestamp_ms(),
-                            ws_sender: ws_sender.clone(),
-                        },
-                    );
+                        clients.write().await.insert(
+                            id.clone(),
+                            ClientEntry::new(id.clone(), addr, mode.clone(), ws_sender.clone()),
+                        );
 
-                    client_id = Some(id.clone());
-                    client_mode = Some(mode.clone());
+                        client_id = Some(id.clone());
+                        client_mode = Some(mode.clone());
 
-                    match mode {
-                        StreamMode::Speaker => {
-                            let mut broadcast_rx = broadcast_tx.subscribe();
-                            let speaker_sender = ws_sender.clone();
-                            let client_id_for_task = id.clone();
+                        match mode {
+                            StreamMode::Speaker => {
+                                let mut broadcast_rx = broadcast_tx.subscribe();
+                                let speaker_sender = ws_sender.clone();
+                                let client_id_for_task = id.clone();
+                                let clients_clone = clients.clone();
 
-                            tokio::spawn(async move {
-                                let mut seq: u64 = 0;
-                                loop {
-                                    match broadcast_rx.recv().await {
-                                        Ok((rate, data)) => {
-                                            let frame = AudioFrame {
-                                                sequence: seq,
-                                                timestamp: timestamp_ms(),
-                                                sample_rate: rate,
-                                                data,
-                                            };
-                                            seq += 1;
-                                            let binary = encode_audio_frame(&frame);
-                                            let mut guard = speaker_sender.lock().await;
-                                            if let Some(sender) = guard.as_mut() {
-                                                if sender
-                                                    .send(WsMessage::Binary(binary))
+                                tokio::spawn(async move {
+                                    let mut seq: u64 = 0;
+                                    loop {
+                                        match broadcast_rx.recv().await {
+                                            Ok((rate, data)) => {
+                                                let frame = AudioFrame {
+                                                    sequence: seq,
+                                                    timestamp: timestamp_ms(),
+                                                    sample_rate: rate,
+                                                    data,
+                                                };
+                                                seq += 1;
+                                                let binary = encode_audio_frame(&frame);
+                                                let bytes_len = binary.len() as u64;
+                                                let mut guard = speaker_sender.lock().await;
+                                                if let Some(sender) = guard.as_mut() {
+                                                    if sender
+                                                        .send(WsMessage::Binary(binary))
+                                                        .await
+                                                        .is_err()
+                                                    {
+                                                        log::info!(
+                                                            "Speaker {} disconnected",
+                                                            client_id_for_task
+                                                        );
+                                                        break;
+                                                    }
+                                                }
+                                                if let Some(entry) = clients_clone
+                                                    .write()
                                                     .await
-                                                    .is_err()
+                                                    .get_mut(&client_id_for_task)
                                                 {
-                                                    log::info!(
-                                                        "Speaker {} disconnected",
-                                                        client_id_for_task
-                                                    );
-                                                    break;
+                                                    entry.bytes_down += bytes_len;
                                                 }
                                             }
+                                            Err(broadcast::error::RecvError::Lagged(n)) => {
+                                                log::debug!("Lagged {} messages", n);
+                                            }
+                                            Err(broadcast::error::RecvError::Closed) => break,
                                         }
-                                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                                            log::debug!("Lagged {} messages", n);
-                                        }
-                                        Err(broadcast::error::RecvError::Closed) => break,
                                     }
-                                }
-                            });
+                                });
 
-                            log::info!("Client {} set as speaker", id);
-                        }
-                        StreamMode::Microphone => {
-                            log::info!("Client {} set as microphone", id);
-                        }
-                    }
-                }
-                Some(Message::AudioData {
-                    data, sample_rate, ..
-                }) => {
-                    if client_mode == Some(StreamMode::Microphone) {
-                        let _ = broadcast_tx.send((sample_rate, data));
-                    }
-                }
-                Some(Message::Pong { timestamp }) => {
-                    let now = timestamp_ms();
-                    let latency = (now as f64 - timestamp as f64) / 2.0;
-                    if let Some(ref id) = client_id {
-                        if let Some(entry) = clients.write().await.get_mut(id) {
-                            entry.latency_ms = latency;
+                                log::info!("Client {} set as speaker", id);
+                            }
+                            StreamMode::Microphone => {
+                                log::info!("Client {} set as microphone", id);
+                            }
                         }
                     }
-                }
-                Some(Message::Ping { timestamp }) => {
-                    let pong = Message::Pong { timestamp };
-                    if let Ok(json) = serde_json::to_string(&pong) {
-                        let mut guard = ws_sender.lock().await;
-                        if let Some(sender) = guard.as_mut() {
-                            let _ = sender.send(WsMessage::Text(json)).await;
+                    Some(Message::AudioData {
+                        data, sample_rate, ..
+                    }) => {
+                        if client_mode == Some(StreamMode::Microphone) {
+                            let _ = broadcast_tx.send((sample_rate, data));
                         }
                     }
-                }
-                Some(Message::LatencyReport { latency_ms }) => {
-                    if let Some(ref id) = client_id {
-                        if let Some(entry) = clients.write().await.get_mut(id) {
-                            entry.latency_ms = latency_ms;
+                    Some(Message::Pong { timestamp }) => {
+                        let now = timestamp_ms();
+                        let latency = (now as f64 - timestamp as f64) / 2.0;
+                        if let Some(ref id) = client_id {
+                            if let Some(entry) = clients.write().await.get_mut(id) {
+                                entry.latency_ms = latency;
+                            }
                         }
                     }
+                    Some(Message::Ping { timestamp }) => {
+                        let pong = Message::Pong { timestamp };
+                        if let Ok(json) = serde_json::to_string(&pong) {
+                            let mut guard = ws_sender.lock().await;
+                            if let Some(sender) = guard.as_mut() {
+                                let _ = sender.send(WsMessage::Text(json)).await;
+                            }
+                        }
+                    }
+                    Some(Message::LatencyReport { latency_ms }) => {
+                        if let Some(ref id) = client_id {
+                            if let Some(entry) = clients.write().await.get_mut(id) {
+                                entry.latency_ms = latency_ms;
+                            }
+                        }
+                    }
+                    Some(_) => {}
+                    None => {
+                        log::warn!("Invalid message from {}", addr);
+                    }
                 }
-                Some(_) => {}
-                None => {
-                    log::warn!("Invalid message from {}", addr);
-                }
-            },
+            }
             Ok(WsMessage::Binary(data)) => {
+                let data_len = data.len() as u64;
+                if let Some(ref id) = client_id {
+                    if let Some(entry) = clients.write().await.get_mut(id) {
+                        entry.bytes_up += data_len;
+                    }
+                }
                 if client_mode == Some(StreamMode::Microphone) {
                     if let Some(frame) = decode_audio_frame(&data) {
                         let _ = broadcast_tx.send((frame.sample_rate, frame.data));
@@ -418,16 +482,21 @@ async fn index_page() -> axum::response::Html<&'static str> {
 }
 
 async fn get_clients(AxumState(state): AxumState<Arc<AppState>>) -> Json<Value> {
-    let clients = state.clients.read().await;
+    let mut clients = state.clients.write().await;
     let list: Vec<Value> = clients
-        .values()
+        .values_mut()
         .map(|c| {
+            c.update_speed();
             json!({
                 "client_id": c.client_id,
                 "addr": c.addr.to_string(),
                 "mode": format!("{:?}", c.mode),
                 "latency_ms": (c.latency_ms * 100.0).round() / 100.0,
                 "connected_at": c.connected_at,
+                "bytes_up": c.bytes_up,
+                "bytes_down": c.bytes_down,
+                "speed_up": (c.speed_up * 10.0).round() / 10.0,
+                "speed_down": (c.speed_down * 10.0).round() / 10.0,
             })
         })
         .collect();

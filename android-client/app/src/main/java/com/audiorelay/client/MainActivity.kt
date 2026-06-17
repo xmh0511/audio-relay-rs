@@ -155,7 +155,7 @@ fun AudioRelayScreen() {
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            Text("Stream PC audio to your phone", fontSize = 14.sp, color = Color.White.copy(alpha = 0.6f))
+            Text(stringResource(R.string.stream_pc_audio), fontSize = 14.sp, color = Color.White.copy(alpha = 0.6f))
 
             Spacer(modifier = Modifier.height(40.dp))
 
@@ -187,7 +187,7 @@ fun AudioRelayScreen() {
             OutlinedTextField(
                 value = serverPort,
                 onValueChange = { serverPort = it },
-                label = { Text("Port") },
+                label = { Text(stringResource(R.string.port)) },
                 leadingIcon = { Icon(Icons.Default.Lan, contentDescription = null) },
                 modifier = Modifier.fillMaxWidth(),
                 enabled = !isPlaying,
@@ -206,7 +206,7 @@ fun AudioRelayScreen() {
             if (discovery.discoveredList.isNotEmpty() && !isPlaying) {
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
-                    text = "Discovered Servers",
+                    text = stringResource(R.string.discovered_servers),
                     color = Color.White.copy(alpha = 0.5f),
                     fontSize = 12.sp
                 )
@@ -302,7 +302,7 @@ fun AudioRelayScreen() {
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = if (isPlaying) "Disconnect" else "Connect",
+                    text = if (isPlaying) stringResource(R.string.disconnect) else stringResource(R.string.connect),
                     fontSize = 18.sp,
                     fontWeight = FontWeight.SemiBold
                 )
@@ -319,7 +319,7 @@ fun AudioRelayScreen() {
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = if (isPlaying) "Streaming" else "Disconnected",
+                    text = if (isPlaying) stringResource(R.string.streaming) else stringResource(R.string.disconnected),
                     color = Color.White.copy(alpha = 0.7f),
                     fontSize = 14.sp
                 )
@@ -334,7 +334,7 @@ fun AudioRelayScreen() {
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
-                            text = "Latency",
+                            text = stringResource(R.string.latency),
                             color = Color.White.copy(alpha = 0.5f),
                             fontSize = 11.sp
                         )
@@ -351,7 +351,7 @@ fun AudioRelayScreen() {
                     }
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
-                            text = "Avg Latency",
+                            text = stringResource(R.string.avg_latency),
                             color = Color.White.copy(alpha = 0.5f),
                             fontSize = 11.sp
                         )
@@ -375,43 +375,48 @@ fun AudioRelayScreen() {
 @Composable
 fun AudioVisualizer(level: Float, isConnected: Boolean) {
     val infiniteTransition = rememberInfiniteTransition(label = "visualizer")
-    val animatedLevel by infiniteTransition.animateFloat(
-        initialValue = 0.3f,
+    val animatedPhase by infiniteTransition.animateFloat(
+        initialValue = 0f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
-            animation = tween(300, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
+            animation = tween(800, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Restart
         ),
-        label = "level"
+        label = "phase"
     )
 
-    val displayLevel = if (isConnected) (level * animatedLevel).coerceIn(0.05f, 1f) else 0f
-
     Row(
-        modifier = Modifier.fillMaxWidth().height(80.dp),
+        modifier = Modifier.fillMaxWidth().height(100.dp),
         horizontalArrangement = Arrangement.SpaceEvenly,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        repeat(12) { index ->
-            val barHeight = when {
-                !isConnected -> 4.dp
-                else -> {
-                    val offset = (index % 4) * 0.15f
-                    ((displayLevel + offset) * 60f).dp.coerceIn(4.dp, 80.dp)
-                }
+        repeat(16) { index ->
+            val phaseOffset = index * 0.12f
+            val wave = if (isConnected) {
+                val base = level * (0.5f + 0.5f * kotlin.math.sin(
+                    (animatedPhase * 2 * Math.PI + phaseOffset).toFloat()
+                ))
+                (base * 80f).coerceIn(4f, 90f)
+            } else {
+                4f
             }
+
+            val barHeight = wave.dp
+            val fraction = wave / 90f
+
             val barColor = when {
-                !isConnected -> Color.White.copy(alpha = 0.1f)
-                barHeight > 60.dp -> Color(0xFFE94560)
-                barHeight > 30.dp -> Color(0xFF533483)
+                !isConnected -> Color.White.copy(alpha = 0.08f)
+                fraction > 0.7f -> Color(0xFFE94560)
+                fraction > 0.4f -> Color(0xFF7B2D8E)
+                fraction > 0.2f -> Color(0xFF533483)
                 else -> Color(0xFF0F3460)
             }
 
             Box(
                 modifier = Modifier
-                    .width(8.dp)
+                    .width(6.dp)
                     .height(barHeight)
-                    .clip(RoundedCornerShape(4.dp))
+                    .clip(RoundedCornerShape(3.dp))
                     .background(barColor)
             )
         }

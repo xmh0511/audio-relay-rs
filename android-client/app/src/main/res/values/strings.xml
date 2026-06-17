@@ -1,8 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">AudioRelay</string>
+    <string name="app_name">Audio Relay</string>
     <string name="notification_channel_id">audio_relay_service</string>
     <string name="notification_channel_name">Audio Relay Service</string>
     <string name="notification_title">Audio Relay</string>
     <string name="notification_text">Streaming audio…</string>
+    <string name="stream_pc_audio">Stream PC audio to your phone</string>
+    <string name="server_ip">Server IP</string>
+    <string name="port">Port</string>
+    <string name="connect">Connect</string>
+    <string name="disconnect">Disconnect</string>
+    <string name="streaming">Streaming</string>
+    <string name="disconnected">Disconnected</string>
+    <string name="latency">Latency</string>
+    <string name="avg_latency">Avg Latency</string>
+    <string name="discovered_servers">Discovered Servers</string>
+    <string name="connecting_to">Connecting to %s:%d</string>
+    <string name="service_not_bound">Service not bound, retrying…</string>
 </resources>

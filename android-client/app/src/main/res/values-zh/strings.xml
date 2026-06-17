@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Audio Relay</string>
+    <string name="notification_channel_id">audio_relay_service</string>
+    <string name="notification_channel_name">Audio Relay 服务</string>
+    <string name="notification_title">Audio Relay</string>
+    <string name="notification_text">正在串流音频…</string>
+    <string name="stream_pc_audio">将 PC 音频串流到手机</string>
+    <string name="server_ip">服务器 IP</string>
+    <string name="port">端口</string>
+    <string name="connect">连接</string>
+    <string name="disconnect">断开</string>
+    <string name="streaming">串流中</string>
+    <string name="disconnected">未连接</string>
+    <string name="latency">延迟</string>
+    <string name="avg_latency">平均延迟</string>
+    <string name="discovered_servers">发现的服务器</string>
+    <string name="connecting_to">正在连接 %s:%d</string>
+    <string name="service_not_bound">服务未绑定，重试中…</string>
+</resources>

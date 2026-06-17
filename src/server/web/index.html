@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Audio Relay - Management</title>
+<title>Audio Relay</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #1a1a2e; color: #eee; min-height: 100vh; }
@@ -27,40 +27,103 @@ h1 { font-size: 28px; margin-bottom: 8px; color: #fff; }
 .mode-speaker { background: #533483; color: #fff; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
 .mode-mic { background: #E94560; color: #fff; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
 .empty { color: #555; text-align: center; padding: 40px; font-size: 14px; }
-.status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-.status-dot.on { background: #4CAF50; }
-.status-dot.off { background: #E94560; }
+.lang-switch { position: absolute; top: 24px; right: 24px; }
+.lang-switch button { background: transparent; border: 1px solid #555; color: #aaa; padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+.lang-switch button.active { border-color: #533483; color: #fff; background: #533483; }
+.header { position: relative; }
 </style>
 </head>
 <body>
 <div class="container">
-    <h1>Audio Relay</h1>
-    <p class="subtitle">Server Management</p>
+    <div class="header">
+        <h1>Audio Relay</h1>
+        <p class="subtitle" data-i18n="subtitle">Server Management</p>
+        <div class="lang-switch">
+            <button id="btnZh" class="active" onclick="setLang('zh')">中文</button>
+            <button id="btnEn" onclick="setLang('en')">EN</button>
+        </div>
+    </div>
 
     <div class="card">
-        <h2>Audio Settings</h2>
+        <h2 data-i18n="audio_settings">Audio Settings</h2>
         <div class="setting-row">
-            <label>Sample Rate</label>
+            <label data-i18n="sample_rate">Sample Rate</label>
             <select id="sampleRate">
                 <option value="22050">22050 Hz</option>
                 <option value="44100" selected>44100 Hz</option>
                 <option value="48000">48000 Hz</option>
                 <option value="96000">96000 Hz</option>
             </select>
-            <button onclick="setSampleRate()">Apply</button>
+            <button onclick="setSampleRate()" data-i18n="apply">Apply</button>
         </div>
         <div id="rateStatus" style="font-size:12px;color:#888;margin-top:4px;"></div>
     </div>
 
     <div class="card">
-        <h2>Connected Devices <span id="clientCount" style="font-size:14px;color:#888;"></span></h2>
+        <h2><span data-i18n="connected_devices">Connected Devices</span> <span id="clientCount" style="font-size:14px;color:#888;"></span></h2>
         <div id="clientList">
-            <div class="empty">No devices connected</div>
+            <div class="empty" data-i18n="no_devices">No devices connected</div>
         </div>
     </div>
 </div>
 
 <script>
+const i18n = {
+    zh: {
+        subtitle: '服务器管理',
+        audio_settings: '音频设置',
+        sample_rate: '采样率',
+        apply: '应用',
+        connected_devices: '已连接设备',
+        no_devices: '暂无设备连接',
+        device: '设备',
+        mode: '模式',
+        latency: '延迟',
+        upload: '上传',
+        download: '下载',
+        speed_up: '速度 ↑',
+        speed_down: '速度 ↓',
+        ip: 'IP',
+        applied: '已应用：',
+        error: '错误：',
+        request_failed: '请求失败',
+    },
+    en: {
+        subtitle: 'Server Management',
+        audio_settings: 'Audio Settings',
+        sample_rate: 'Sample Rate',
+        apply: 'Apply',
+        connected_devices: 'Connected Devices',
+        no_devices: 'No devices connected',
+        device: 'Device',
+        mode: 'Mode',
+        latency: 'Latency',
+        upload: 'Upload',
+        download: 'Download',
+        speed_up: 'Speed ↑',
+        speed_down: 'Speed ↓',
+        ip: 'IP',
+        applied: 'Applied: ',
+        error: 'Error: ',
+        request_failed: 'Request failed',
+    }
+};
+
+let currentLang = localStorage.getItem('lang') || 'zh';
+
+function setLang(lang) {
+    currentLang = lang;
+    localStorage.setItem('lang', lang);
+    document.getElementById('btnZh').className = lang === 'zh' ? 'active' : '';
+    document.getElementById('btnEn').className = lang === 'en' ? 'active' : '';
+    document.querySelectorAll('[data-i18n]').forEach(el => {
+        el.textContent = i18n[lang][el.dataset.i18n] || el.textContent;
+    });
+    fetchClients();
+}
+
+function t(key) { return i18n[currentLang][key] || key; }
+
 async function fetchClients() {
     try {
         const res = await fetch('/api/clients');
@@ -69,11 +132,15 @@ async function fetchClients() {
         document.getElementById('clientCount').textContent = `(${list.length})`;
 
         if (list.length === 0) {
-            document.getElementById('clientList').innerHTML = '<div class="empty">No devices connected</div>';
+            document.getElementById('clientList').innerHTML = `<div class="empty">${t('no_devices')}</div>`;
             return;
         }
 
-        let html = '<table class="client-table"><thead><tr><th>Device</th><th>Mode</th><th>Latency</th><th>IP</th></tr></thead><tbody>';
+        let html = `<table class="client-table"><thead><tr>
+            <th>${t('device')}</th><th>${t('mode')}</th><th>${t('latency')}</th>
+            <th>${t('upload')}</th><th>${t('download')}</th>
+            <th>${t('speed_up')}</th><th>${t('speed_down')}</th><th>${t('ip')}</th>
+        </tr></thead><tbody>`;
         for (const c of list) {
             const latClass = c.latency_ms < 50 ? 'good' : c.latency_ms < 150 ? 'ok' : 'bad';
             const modeClass = c.mode === 'Speaker' ? 'mode-speaker' : 'mode-mic';
@@ -81,6 +148,10 @@ async function fetchClients() {
                 <td>${esc(c.client_id)}</td>
                 <td><span class="${modeClass}">${c.mode}</span></td>
                 <td><span class="latency ${latClass}">${c.latency_ms} ms</span></td>
+                <td>${formatBytes(c.bytes_up)}</td>
+                <td>${formatBytes(c.bytes_down)}</td>
+                <td>${formatSpeed(c.speed_up)}</td>
+                <td>${formatSpeed(c.speed_down)}</td>
                 <td>${esc(c.addr)}</td>
             </tr>`;
         }
@@ -110,14 +181,14 @@ async function setSampleRate() {
         });
         const data = await res.json();
         if (data.ok) {
-            status.textContent = 'Applied: ' + data.sample_rate + ' Hz';
+            status.textContent = t('applied') + data.sample_rate + ' Hz';
             status.style.color = '#4CAF50';
         } else {
-            status.textContent = 'Error: ' + data.error;
+            status.textContent = t('error') + data.error;
             status.style.color = '#E94560';
         }
     } catch (e) {
-        status.textContent = 'Request failed';
+        status.textContent = t('request_failed');
         status.style.color = '#E94560';
     }
 }
@@ -128,6 +199,20 @@ function esc(s) {
     return d.innerHTML;
 }
 
+function formatBytes(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+}
+
+function formatSpeed(bytesPerSec) {
+    if (bytesPerSec < 1024) return bytesPerSec.toFixed(0) + ' B/s';
+    if (bytesPerSec < 1024 * 1024) return (bytesPerSec / 1024).toFixed(1) + ' KB/s';
+    return (bytesPerSec / (1024 * 1024)).toFixed(1) + ' MB/s';
+}
+
+setLang(currentLang);
 fetchClients();
 fetchSampleRate();
 setInterval(fetchClients, 2000);
