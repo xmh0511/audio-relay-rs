@@ -19,8 +19,8 @@
 import http from 'k6/http';
 
 export const options = {
-  vus: 600,        // 3000 个并发虚拟用户
-  iterations: 600, // 总共执行 3000 次请求（每个 VU 执行 1 次）
+  vus: 3000,        // 3000 个并发虚拟用户
+  iterations: 3000, // 总共执行 3000 次请求（每个 VU 执行 1 次）
 };
 
 const rates = [22050, 44100, 48000, 96000];
