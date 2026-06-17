@@ -160,14 +160,18 @@ async fn start_audio_capture(state: &AppState) -> Result<AudioCapture> {
     let broadcast_tx = state.broadcast_tx.clone();
 
     let capture = AudioCapture::new(audio_tx)?;
-
+    // let mut previous_rate = ACTUAL_SAMPLE_RATE.load(std::sync::atomic::Ordering::Relaxed);
     tokio::spawn(async move {
         let mut resampler: Option<AudioResampler> = None;
         let mut buffers = ResampleBuffers::new(CHANNELS as usize, 1024);
-
+        // let mut changed_count = 0;
         while let Some((device_rate, data)) = audio_rx.recv().await {
             let target_rate = ACTUAL_SAMPLE_RATE.load(std::sync::atomic::Ordering::Relaxed);
-
+            // if previous_rate != target_rate{
+            //     previous_rate = target_rate;
+            //     changed_count+=1;
+            // }
+            // log::info!("changed count === {}",changed_count);
             if device_rate == target_rate {
                 resampler = None;
                 let _ = broadcast_tx.send((device_rate, data));
@@ -543,7 +547,7 @@ async fn set_sample_rate(
 
     let rate = rate as u32;
     ACTUAL_SAMPLE_RATE.store(rate, std::sync::atomic::Ordering::Relaxed);
-    log::info!("Sample rate set to {}Hz", rate);
+    log::debug!("Sample rate set to {}Hz", rate);
 
     Json(json!({ "ok": true, "sample_rate": rate }))
 }

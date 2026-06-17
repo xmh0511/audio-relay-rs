@@ -8,7 +8,7 @@
 - **手机 → PC**：将手机麦克风音频传输到 PC 播放（Microphone 模式）
 - **前台服务**：Android 端使用 Foreground Service + Wake Lock，熄屏或切换后台后持续运行
 - **跨平台服务端**：支持 Windows / Linux / macOS
-- **Web 管理界面**：通过 HTTP API 查看客户端状态、调整采样率
+- **Web 管理界面**：通过 HTTP API 查看客户端状态、实时调整采样率（无需重启采集）
 
 ## 快速开始
 
@@ -73,22 +73,25 @@ Options:
 ```
 audio-relay-rs/
 ├── Cargo.toml
-├── instruction.md              # 实现细节与设计文档
+├── README.md                    # 项目说明
+├── instruction.md               # 实现细节与设计文档
 ├── src/
-│   ├── main.rs                 # CLI 入口
-│   ├── protocol/mod.rs         # 通信协议（JSON 控制帧 + 二进制音频帧）
+│   ├── main.rs                  # CLI 入口
+│   ├── protocol/mod.rs          # 通信协议（JSON 控制帧 + 二进制音频帧）
 │   ├── audio/
-│   │   ├── capture.rs          # 音频采集（Windows WASAPI / 跨平台 cpal）
-│   │   ├── playback.rs         # 音频播放（cpal + crossbeam-channel）
-│   │   └── resampler.rs        # 采样率转换（rubato SincFixedIn）
-│   ├── server/mod.rs           # WebSocket 服务端 + Web API
-│   └── client/mod.rs           # WebSocket 客户端（PC 测试用）
-├── android-client/             # Android 客户端（Kotlin）
+│   │   ├── capture.rs           # 音频采集（WASAPI/cpal，设备原生采样率输出）
+│   │   ├── playback.rs          # 音频播放（cpal + crossbeam-channel）
+│   │   └── resampler.rs         # 采样率转换（rubato SincFixedIn + 可复用缓冲区）
+│   ├── server/
+│   │   ├── mod.rs               # WebSocket 服务端 + Web API + Relay Task
+│   │   └── web/index.html       # Web 管理界面
+│   └── client/mod.rs            # WebSocket 客户端（PC 测试用）
+├── android-client/              # Android 客户端（Kotlin）
 │   └── app/src/main/java/com/audiorelay/client/
-│       ├── AudioRelayService.kt  # 前台服务 + WebSocket + AudioTrack
-│       └── MainActivity.kt       # Jetpack Compose UI
+│       ├── AudioRelayService.kt # 前台服务 + WebSocket + AudioTrack
+│       └── MainActivity.kt      # Jetpack Compose UI
 └── .github/workflows/
-    └── build.yml               # CI/CD 自动构建
+    └── build.yml                # CI/CD 自动构建
 ```
 
 ## 技术栈
@@ -102,7 +105,7 @@ audio-relay-rs/
 | 播放回调通道 | crossbeam-channel |
 | Android 客户端 | Kotlin + Jetpack Compose + OkHttp + AudioTrack |
 | 通信协议 | WebSocket（JSON 控制帧 + 二进制音频帧） |
-| 音频格式 | PCM 16-bit, 44100Hz, Mono |
+| 音频格式 | PCM 16-bit, Mono（采样率动态可调） |
 
 ## 协议说明
 
@@ -162,8 +165,8 @@ cd android-client
 - 检查 PC 端是否有音频正在播放
 
 **Q: 音频有延迟？**
-- 默认使用 44100Hz 采样率，局域网延迟通常 < 50ms
-- 可通过 Web API 调整采样率
+- 局域网延迟通常 < 50ms
+- 可通过 Web 管理界面（http://localhost:8081）实时调整采样率，无需重启
 
 **Q: Android 后台被杀死？**
 - 确保 App 有通知权限

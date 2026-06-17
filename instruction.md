@@ -7,14 +7,19 @@
 │   Android   │ ◄════════════════► │  Rust Server │
 │   Client    │   JSON + Binary    │              │
 └─────────────┘                    └──────┬───────┘
-                                          │ broadcast channel
+                                          │ mpsc channel (device_rate, data)
                                    ┌──────▼───────┐
                                    │ AudioCapture  │
                                    │ (WASAPI/cpal) │
+                                   └──────┬───────┘
+                                          │ broadcast channel (target_rate, data)
+                                   ┌──────▼───────┐
+                                   │ Relay Task    │
+                                   │ (resample)    │
                                    └──────────────┘
 ```
 
-数据流：音频设备 → AudioCapture → broadcast channel → WebSocket → Android AudioTrack
+数据流：音频设备 → AudioCapture（设备原生采样率） → mpsc channel → Relay Task（读取 `ACTUAL_SAMPLE_RATE`，按需重采样） → broadcast channel → WebSocket → Android AudioTrack
 
 ---
 
@@ -87,18 +92,17 @@ pub struct AudioFrame {
 
 ```rust
 pub struct AudioCapture {
-    stop_flag: Arc<AtomicBool>,         // 通知采集线程停止
-    stopped_rx: Option<oneshot::Receiver<()>>,  // 等待线程结束
-    _handle: Option<JoinHandle<()>>,    // 采集线程句柄
+    stop_flag: Arc<AtomicBool>,                     // 通知采集线程停止
+    stopped_rx: Option<oneshot::Receiver<()>>,      // 等待线程结束
+    _handle: Option<JoinHandle<()>>,                // 采集线程句柄
 }
 ```
 
 - `detect_sample_rate()` — 启动时查询默认音频设备的原生采样率（WASAPI `get_mixformat()` / cpal `default_output_config()`），返回设备真实采样率
-- `new()` — 在新 OS 线程中启动采集（非 tokio 线程，避免阻塞异步运行时）
-- `stop()` — 设置 stop_flag，采集线程会在下次循环检查时退出
-- `wait_stopped()` — 异步等待采集线程结束（通过 oneshot channel）
+- `new(tx)` — 在新 OS 线程中启动采集，只负责按设备原生采样率捕获音频，发送 `(device_rate, Vec<u8>)` 到 channel
+- `abort()` — 设置 stop_flag 并等待线程安全退出（stop + wait_stopped 合一）
 
-服务器启动时调用 `detect_sample_rate()` 获取设备真实采样率，写入 `ACTUAL_SAMPLE_RATE`，避免预设值与实际设备不匹配。
+采集线程**不做任何重采样**，始终以设备原生采样率输出。重采样由 server 端的 Relay Task 完成。
 
 #### Windows 路径 (`capture_windows`)
 
@@ -166,15 +170,28 @@ cpal 回调中使用 `rx.try_recv()`（无锁/低锁），避免在实时音频�
 
 ### 4. audio/resampler.rs — 采样率转换
 
-使用 rubato 库的 `SincFixedIn` sinc 插值重采样器：
+使用 rubato 库的 `SincFixedIn` sinc 插值重采样器。
+
+缓冲区与采样器分离设计：
 
 ```rust
 pub struct AudioResampler {
     resampler: SincFixedIn<f64>,
-    input_buffer: Vec<Vec<f64>>,   // 每通道输入缓冲
-    temp_channels: Vec<Vec<f64>>,  // 处理用临时缓冲（复用）
+    pub source_rate: u32,
+    pub target_rate: u32,
+    channels: usize,
+    chunk_size: usize,
+}
+
+pub struct ResampleBuffers {
+    pub input_buffer: Vec<Vec<f64>>,   // 每通道输入缓冲
+    pub temp_channels: Vec<Vec<f64>>,  // 处理用临时缓冲
 }
 ```
+
+- `ResampleBuffers` 在 `start_audio_capture` 中分配一次，跨 resampler 重建复用（仅依赖 channels，固定值）
+- `AudioResampler::new()` 接收 `&mut ResampleBuffers`，重建时只替换算法实例，不重分配缓冲区
+- `AudioResampler::resample()` 接收 `&mut ResampleBuffers`，使用外部缓冲区处理
 
 参数：
 - `sinc_len: 256` — sinc 滤波器长度
@@ -218,11 +235,26 @@ assert_eq!(original, decoded);  // 值完全一致
 
 ```rust
 pub struct AppState {
-    pub clients: ClientInfo,                           // 已连接客户端
-    pub audio_capture: Arc<Mutex<Option<AudioCaptureState>>>,  // 当前音频采集
+    pub clients: ClientInfo,                                    // 已连接客户端
     pub broadcast_tx: broadcast::Sender<(u32, Vec<u8>)>,       // 音频广播
 }
+
+pub static ACTUAL_SAMPLE_RATE: AtomicU32 = AtomicU32::new(44100);  // 全局采样率
 ```
+
+#### 采样率切换机制
+
+`ACTUAL_SAMPLE_RATE` 是唯一的采样率状态源。切换采样率只需一行原子操作：
+
+```rust
+ACTUAL_SAMPLE_RATE.store(new_rate, Ordering::Relaxed);
+```
+
+Relay Task 每帧读取 `ACTUAL_SAMPLE_RATE`，与 capture 的 `device_rate` 比对：
+- 相同 → 直接转发
+- 不同 → 创建/复用 AudioResampler 重采样后转发
+
+Web UI 每 2 秒轮询 `GET /api/sample-rate` 保持同步。
 
 #### 连接处理流程
 
@@ -238,7 +270,7 @@ pub struct AppState {
 - `GET /` — 管理界面 HTML
 - `GET /api/clients` — 已连接客户端列表
 - `GET /api/sample-rate` — 当前采样率
-- `POST /api/sample-rate` — 动态切换采样率（重启音频采集）
+- `POST /api/sample-rate` — 设置采样率（原子写入 `ACTUAL_SAMPLE_RATE`，无需重启采集）
 
 #### UDP 发现
 
@@ -342,6 +374,5 @@ Windows 端使用 WASAPI Loopback 捕获系统音频输出（而非麦克风输�
 ## 已知限制
 
 1. **单客户端 Speaker**：broadcast channel 只支持一个 Speaker 客户端，多个 Speaker 会各自收到相同数据
-2. **采样率切换**：动态切换采样率需要重启音频采集，可能有短暂中断
-3. **UDP 发现端口硬编码**：8082 端口无法通过命令行配置
-4. **无 TLS**：WebSocket 连接未加密，仅适合局域网使用
+2. **UDP 发现端口硬编码**：8082 端口无法通过命令行配置
+3. **无 TLS**：WebSocket 连接未加密，仅适合局域网使用
