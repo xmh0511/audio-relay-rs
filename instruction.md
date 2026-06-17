@@ -3,23 +3,21 @@
 ## 架构概览
 
 ```
-┌─────────────┐     WebSocket      ┌─────────────┐
-│   Android   │ ◄════════════════► │  Rust Server │
-│   Client    │   JSON + Binary    │              │
-└─────────────┘                    └──────┬───────┘
-                                          │ mpsc channel (device_rate, data)
-                                   ┌──────▼───────┐
-                                   │ AudioCapture  │
+                                   ┌──────────────┐
+                                   │ AudioCapture  │  OS 线程（设备原生采样率）
                                    │ (WASAPI/cpal) │
                                    └──────┬───────┘
-                                          │ broadcast channel (target_rate, data)
-                                   ┌──────▼───────┐
-                                   │ Relay Task    │
-                                   │ (resample)    │
-                                   └──────────────┘
+                                          │ mpsc (device_rate, data)
+┌─────────────┐     WebSocket      ┌──────▼──────────────────────────┐
+│   Android   │ ◄════════════════► │        Rust Server              │
+│   Client    │   JSON + Binary    │                                  │
+└─────────────┘                    │  Relay Task → broadcast channel  │
+                                   │  (读 ACTUAL_SAMPLE_RATE,        │
+                                   │   按需重采样) → WebSocket Handler│
+                                   └─────────────────────────────────┘
 ```
 
-数据流：音频设备 → AudioCapture（设备原生采样率） → mpsc channel → Relay Task（读取 `ACTUAL_SAMPLE_RATE`，按需重采样） → broadcast channel → WebSocket → Android AudioTrack
+数据流：音频设备 → AudioCapture（设备原生采样率） → mpsc channel → Relay Task（读取 `ACTUAL_SAMPLE_RATE`，按需重采样） → broadcast channel → WebSocket Handler → Android AudioTrack
 
 ---
 
