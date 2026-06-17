@@ -67,8 +67,7 @@ pub async fn run_client(server_host: &str, port: u16, as_mic: bool) -> Result<()
             log::info!("Starting in microphone mode");
             let (tx, mut rx) = tokio::sync::mpsc::channel::<(u32, Vec<u8>)>(50);
 
-            let _capture = AudioCapture::new(tx, crate::protocol::SAMPLE_RATE)
-                .context("Failed to initialize audio capture")?;
+            let _capture = AudioCapture::new(tx).context("Failed to initialize audio capture")?;
 
             let mut audio_seq: u64 = 0;
 

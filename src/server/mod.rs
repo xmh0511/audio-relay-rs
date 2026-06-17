@@ -11,6 +11,7 @@ use tokio_tungstenite::accept_async;
 use tungstenite::Message as WsMessage;
 
 use crate::audio::capture::AudioCapture;
+use crate::audio::resampler::{AudioResampler, ResampleBuffers};
 use crate::protocol::{
     decode_audio_frame, encode_audio_frame, timestamp_ms, AudioFrame, Message, StreamMode, CHANNELS,
 };
@@ -78,14 +79,8 @@ impl ClientEntry {
     }
 }
 
-pub struct AudioCaptureState {
-    pub capture: AudioCapture,
-    pub broadcast_handle: tokio::task::JoinHandle<()>,
-}
-
 pub struct AppState {
     pub clients: ClientInfo,
-    pub audio_capture: Arc<Mutex<Option<AudioCaptureState>>>,
     pub broadcast_tx: broadcast::Sender<(u32, Vec<u8>)>,
 }
 
@@ -103,7 +98,6 @@ pub async fn run_server(host: &str, port: u16, web_port: u16) -> Result<()> {
 
     let state = Arc::new(AppState {
         clients: Arc::new(RwLock::new(HashMap::new())),
-        audio_capture: Arc::new(Mutex::new(None)),
         broadcast_tx: broadcast_tx.clone(),
     });
 
@@ -154,46 +148,77 @@ pub async fn run_server(host: &str, port: u16, web_port: u16) -> Result<()> {
         }
     });
 
-    replace_audio_capture(&state, detected_rate).await.ok();
+    let mut capture = start_audio_capture(&state).await?;
 
     server_handle.await?;
+    capture.abort().await;
     Ok(())
 }
 
-async fn replace_audio_capture(state: &AppState, target_rate: u32) -> Result<()> {
-    let mut guard = state.audio_capture.lock().await;
-
-    if let Some(mut old) = guard.take() {
-        old.broadcast_handle.abort();
-        old.capture.stop();
-        old.capture.wait_stopped().await;
-    }
-
-    ACTUAL_SAMPLE_RATE.store(target_rate, std::sync::atomic::Ordering::Relaxed);
-
+async fn start_audio_capture(state: &AppState) -> Result<AudioCapture> {
     let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<(u32, Vec<u8>)>(200);
     let broadcast_tx = state.broadcast_tx.clone();
 
-    match AudioCapture::new(audio_tx, target_rate) {
-        Ok(capture) => {
-            let handle = tokio::spawn(async move {
-                while let Some(item) = audio_rx.recv().await {
-                    let _ = broadcast_tx.send(item);
-                }
-            });
+    let capture = AudioCapture::new(audio_tx)?;
 
-            *guard = Some(AudioCaptureState {
-                capture,
-                broadcast_handle: handle,
-            });
-            log::info!("Audio capture started at {}Hz", target_rate);
-            Ok(())
+    tokio::spawn(async move {
+        let mut resampler: Option<AudioResampler> = None;
+        let mut buffers = ResampleBuffers::new(CHANNELS as usize, 1024);
+
+        while let Some((device_rate, data)) = audio_rx.recv().await {
+            let target_rate = ACTUAL_SAMPLE_RATE.load(std::sync::atomic::Ordering::Relaxed);
+
+            if device_rate == target_rate {
+                resampler = None;
+                let _ = broadcast_tx.send((device_rate, data));
+                continue;
+            }
+
+            if resampler.as_ref().map_or(true, |r| {
+                r.source_rate != device_rate || r.target_rate != target_rate
+            }) {
+                resampler = match AudioResampler::new(
+                    device_rate,
+                    target_rate,
+                    CHANNELS as usize,
+                    &mut buffers,
+                ) {
+                    Ok(r) => Some(r),
+                    Err(e) => {
+                        log::error!("Failed to create resampler: {}", e);
+                        None
+                    }
+                };
+            }
+
+            let (send_rate, send_data) = if let Some(ref mut rs) = resampler {
+                let i16_data: Vec<i16> = data
+                    .chunks_exact(2)
+                    .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                    .collect();
+                match rs.resample(&i16_data, &mut buffers) {
+                    Ok(resampled) => {
+                        let mut bytes = Vec::with_capacity(resampled.len() * 2);
+                        for s in resampled {
+                            bytes.extend_from_slice(&s.to_le_bytes());
+                        }
+                        (target_rate, bytes)
+                    }
+                    Err(e) => {
+                        log::warn!("Resample error: {}", e);
+                        (device_rate, data)
+                    }
+                }
+            } else {
+                (device_rate, data)
+            };
+
+            let _ = broadcast_tx.send((send_rate, send_data));
         }
-        Err(e) => {
-            log::error!("Failed to start audio capture: {}", e);
-            Err(e)
-        }
-    }
+    });
+
+    log::info!("Audio capture started");
+    Ok(capture)
 }
 
 fn start_udp_broadcast(_host: &str, port: u16, web_port: u16) {
@@ -509,7 +534,7 @@ async fn get_sample_rate(AxumState(_state): AxumState<Arc<AppState>>) -> Json<Va
 }
 
 async fn set_sample_rate(
-    AxumState(state): AxumState<Arc<AppState>>,
+    AxumState(_state): AxumState<Arc<AppState>>,
     Json(payload): Json<Value>,
 ) -> Json<Value> {
     let Some(rate) = payload.get("sample_rate").and_then(|v| v.as_u64()) else {
@@ -517,11 +542,8 @@ async fn set_sample_rate(
     };
 
     let rate = rate as u32;
-    log::info!("Sample rate changed to {}Hz, restarting capture...", rate);
-
-    if let Err(e) = replace_audio_capture(&state, rate).await {
-        return Json(json!({ "ok": false, "error": format!("{}", e) }));
-    }
+    ACTUAL_SAMPLE_RATE.store(rate, std::sync::atomic::Ordering::Relaxed);
+    log::info!("Sample rate set to {}Hz", rate);
 
     Json(json!({ "ok": true, "sample_rate": rate }))
 }

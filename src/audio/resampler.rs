@@ -4,16 +4,33 @@ use rubato::{
 
 pub struct AudioResampler {
     resampler: SincFixedIn<f64>,
-    source_rate: u32,
-    target_rate: u32,
+    pub source_rate: u32,
+    pub target_rate: u32,
     channels: usize,
     chunk_size: usize,
-    input_buffer: Vec<Vec<f64>>,
-    temp_channels: Vec<Vec<f64>>,
+}
+
+pub struct ResampleBuffers {
+    pub input_buffer: Vec<Vec<f64>>,
+    pub temp_channels: Vec<Vec<f64>>,
+}
+
+impl ResampleBuffers {
+    pub fn new(channels: usize, chunk_size: usize) -> Self {
+        Self {
+            input_buffer: vec![Vec::with_capacity(chunk_size * 2); channels],
+            temp_channels: vec![Vec::with_capacity(chunk_size); channels],
+        }
+    }
 }
 
 impl AudioResampler {
-    pub fn new(source_rate: u32, target_rate: u32, channels: usize) -> Result<Self, String> {
+    pub fn new(
+        source_rate: u32,
+        target_rate: u32,
+        channels: usize,
+        buffers: &mut ResampleBuffers,
+    ) -> Result<Self, String> {
         if source_rate == target_rate {
             return Err("source and target rate are the same".into());
         }
@@ -33,6 +50,10 @@ impl AudioResampler {
             SincFixedIn::<f64>::new(ratio, max_ratio_factor, params, chunk_size, channels)
                 .map_err(|e| format!("Failed to create resampler: {:?}", e))?;
 
+        for buf in buffers.input_buffer.iter_mut() {
+            buf.clear();
+        }
+
         log::info!(
             "Resampler created: {}Hz -> {}Hz, {}ch, chunk={}",
             source_rate,
@@ -47,31 +68,29 @@ impl AudioResampler {
             target_rate,
             channels,
             chunk_size,
-            input_buffer: vec![Vec::with_capacity(chunk_size * 2); channels],
-            temp_channels: vec![Vec::with_capacity(chunk_size); channels],
         })
     }
 
-    pub fn resample(&mut self, input: &[i16]) -> Result<Vec<i16>, String> {
-        if self.source_rate == self.target_rate {
-            return Ok(input.to_vec());
-        }
-
+    pub fn resample(
+        &mut self,
+        input: &[i16],
+        buffers: &mut ResampleBuffers,
+    ) -> Result<Vec<i16>, String> {
         for (i, &sample) in input.iter().enumerate() {
             let ch = i % self.channels;
-            self.input_buffer[ch].push(sample as f64 / i16::MAX as f64);
+            buffers.input_buffer[ch].push(sample as f64 / i16::MAX as f64);
         }
 
         let mut result = Vec::new();
 
-        while self.input_buffer[0].len() >= self.chunk_size {
-            for (i, buf) in self.input_buffer.iter_mut().enumerate() {
-                self.temp_channels[i].clear();
-                self.temp_channels[i].extend_from_slice(&buf[..self.chunk_size]);
+        while buffers.input_buffer[0].len() >= self.chunk_size {
+            for (i, buf) in buffers.input_buffer.iter_mut().enumerate() {
+                buffers.temp_channels[i].clear();
+                buffers.temp_channels[i].extend_from_slice(&buf[..self.chunk_size]);
                 buf.drain(..self.chunk_size);
             }
 
-            let channels_data: Vec<&[f64]> = self
+            let channels_data: Vec<&[f64]> = buffers
                 .temp_channels
                 .iter()
                 .map(|buf| buf.as_slice())
