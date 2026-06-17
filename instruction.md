@@ -187,6 +187,29 @@ pub struct AudioResampler {
 2. 累积到 `chunk_size` 后批量处理
 3. 输出 clamp 到 `[-1.0, 1.0]` 后转回 i16
 
+**字节序往返正确性说明**：
+
+当 capture 线程将硬件采集的 i16 数据存为 `Vec<u8>`（通过 `to_le_bytes()`）后，resample 时需要反序列化回 `Vec<i16>`。使用 `from_le_bytes()` 可以保证得到的 i16 值与硬件原始采样值完全一致，原因如下：
+
+```rust
+// 硬件采样得到 i16 值 16383
+let original: i16 = 16383;
+
+// 编码为 LE 字节
+let bytes: Vec<u8> = original.to_le_bytes().to_vec();  // [0xFF, 0x3F]
+
+// 解码回 i16
+let decoded: i16 = i16::from_le_bytes([bytes[0], bytes[1]]);  // 16383 ✓
+assert_eq!(original, decoded);  // 值完全一致
+```
+
+关键点：
+- `to_le_bytes()` 将 i16 的低位字节放在低地址，高位字节放在高地址
+- `from_le_bytes()` 按相同规则（LE）解释字节序列，还原出原始 i16 数值
+- 只要编码和解码使用相同的字节序，值就是精确还原的，不存在精度损失
+- rubato 内部处理的是 f64 数值（归一化到 -1.0~1.0），不涉及字节序问题
+- 字节序只在 `Vec<u8>` ↔ `Vec<i16>` 转换边界有意义，管道内部全程使用数值类型
+
 ---
 
 ### 5. server/mod.rs — 服务端
