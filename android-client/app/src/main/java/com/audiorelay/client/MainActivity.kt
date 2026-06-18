@@ -40,7 +40,7 @@ class MainActivity : ComponentActivity() {
     ) { permissions ->
         val allGranted = permissions.values.all { it }
         if (!allGranted) {
-            Toast.makeText(this, "Some permissions denied", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.permissions_denied), Toast.LENGTH_SHORT).show()
         }
         requestBatteryOptimization()
     }
@@ -167,7 +167,7 @@ fun AudioRelayScreen() {
             OutlinedTextField(
                 value = serverHost,
                 onValueChange = { serverHost = it },
-                label = { Text("Server IP") },
+                label = { Text(stringResource(R.string.server_ip)) },
                 leadingIcon = { Icon(Icons.Default.Dns, contentDescription = null) },
                 modifier = Modifier.fillMaxWidth(),
                 enabled = !isPlaying,
@@ -228,7 +228,7 @@ fun AudioRelayScreen() {
                                 context.startService(intent)
                             }
                             isPlaying = true
-                            Toast.makeText(context, "Connecting to ${server.address}:${server.wsPort}", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, context.getString(R.string.connecting_to, server.address, server.wsPort), Toast.LENGTH_SHORT).show()
                         },
                         modifier = Modifier
                             .fillMaxWidth()
@@ -287,7 +287,7 @@ fun AudioRelayScreen() {
                             context.startService(intent)
                         }
                         isPlaying = true
-                        Toast.makeText(context, "Connecting to $serverHost:$port", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, context.getString(R.string.connecting_to, serverHost, port), Toast.LENGTH_SHORT).show()
                     }
                 },
                 modifier = Modifier.fillMaxWidth().height(56.dp),

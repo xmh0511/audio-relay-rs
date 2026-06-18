@@ -17,4 +17,8 @@
     <string name="discovered_servers">发现的服务器</string>
     <string name="connecting_to">正在连接 %1$s:%2$d</string>
     <string name="service_not_bound">服务未绑定，重试中…</string>
+    <string name="connected_waiting">已连接，等待握手…</string>
+    <string name="reconnecting">重连中…</string>
+    <string name="stop">停止</string>
+    <string name="permissions_denied">部分权限被拒绝</string>
 </resources>

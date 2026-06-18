@@ -57,7 +57,7 @@ class AudioRelayService : Service() {
             ACTION_START -> {
                 val host = intent.getStringExtra(EXTRA_HOST) ?: "192.168.1.100"
                 val port = intent.getIntExtra(EXTRA_PORT, 8080)
-                startForeground(NOTIFICATION_ID, buildNotification("Connecting to $host:$port…"))
+                startForeground(NOTIFICATION_ID, buildNotification(getString(R.string.connecting_to, host, port)))
                 shouldReconnect = true
                 connect(host, port)
             }
@@ -91,13 +91,13 @@ class AudioRelayService : Service() {
             .build()
 
         updateState(ServiceState.CONNECTING)
-        updateNotification("Connecting to $host:$port…")
+        updateNotification(getString(R.string.connecting_to, host, port))
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 Log.d(TAG, "WebSocket connected")
                 sendHello(webSocket)
-                updateNotification("Connected, waiting for handshake…")
+                updateNotification(getString(R.string.connected_waiting))
                 updateState(ServiceState.CONNECTED)
                 startPingJob()
             }
@@ -171,7 +171,7 @@ class AudioRelayService : Service() {
                 Log.d(TAG, "HelloAck: session=$sessionId, rate=$serverSampleRate")
                 currentSampleRate = serverSampleRate
                 initAudioTrack(serverSampleRate)
-                updateNotification("Streaming audio…")
+                updateNotification(getString(R.string.notification_text))
                 updateState(ServiceState.STREAMING)
             }
             json.has("Pong") -> {
@@ -282,7 +282,7 @@ class AudioRelayService : Service() {
 
         if (shouldReconnect) {
             Log.d(TAG, "Connection lost, reconnecting in 3s...")
-            updateNotification("Reconnecting…")
+            updateNotification(getString(R.string.reconnecting))
             updateState(ServiceState.CONNECTING)
             scope.launch {
                 delay(3000)
@@ -293,7 +293,7 @@ class AudioRelayService : Service() {
         } else {
             releaseWakeLock()
             updateState(ServiceState.DISCONNECTED)
-            updateNotification("Disconnected")
+            updateNotification(getString(R.string.disconnected))
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
@@ -387,11 +387,11 @@ class AudioRelayService : Service() {
         )
 
         return NotificationCompat.Builder(this, AudioRelayApp.NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("Audio Relay")
+            .setContentTitle(getString(R.string.notification_title))
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentIntent(pendingIntent)
-            .addAction(android.R.drawable.ic_media_pause, "Stop", stopIntent)
+            .addAction(android.R.drawable.ic_media_pause, getString(R.string.stop), stopIntent)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)

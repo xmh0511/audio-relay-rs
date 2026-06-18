@@ -151,6 +151,7 @@ pub async fn run_server(host: &str, port: u16, web_port: u16) -> Result<()> {
     let mut capture = start_audio_capture(&state).await?;
 
     server_handle.await?;
+    log::info!("Waiting to clean the capture instance");
     capture.abort().await;
     Ok(())
 }

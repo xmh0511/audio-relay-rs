@@ -16,10 +16,10 @@ class AudioRelayApp : Application() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 NOTIFICATION_CHANNEL_ID,
-                "Audio Relay Service",
+                getString(R.string.notification_channel_name),
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Keeps audio streaming alive"
+                description = getString(R.string.notification_channel_name)
                 setShowBadge(false)
             }
             val manager = getSystemService(NotificationManager::class.java)
