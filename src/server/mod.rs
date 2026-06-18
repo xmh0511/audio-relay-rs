@@ -156,23 +156,47 @@ pub async fn run_server(host: &str, port: u16, web_port: u16) -> Result<()> {
     Ok(())
 }
 
+#[cfg(presure_rate)]
+struct PresureRate {
+    previous_rate: u32,
+    changed_count: u32,
+}
+#[cfg(presure_rate)]
+impl PresureRate {
+    fn new(init_rate: u32) -> Self {
+        PresureRate {
+            previous_rate: init_rate,
+            changed_count: 0,
+        }
+    }
+    fn diff(&mut self, target_rate: u32, printer: fn(u32, u32, u32)) {
+        if self.previous_rate != target_rate {
+            self.changed_count += 1;
+            printer(self.changed_count, self.previous_rate, target_rate);
+            self.previous_rate = target_rate;
+        }
+    }
+}
+
 async fn start_audio_capture(state: &AppState) -> Result<AudioCapture> {
     let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<(u32, Vec<u8>)>(200);
     let broadcast_tx = state.broadcast_tx.clone();
 
     let capture = AudioCapture::new(audio_tx)?;
-    // let mut previous_rate = ACTUAL_SAMPLE_RATE.load(std::sync::atomic::Ordering::Relaxed);
+    #[cfg(presure_rate)]
+    let mut presure_rate =
+        PresureRate::new(ACTUAL_SAMPLE_RATE.load(std::sync::atomic::Ordering::Relaxed));
+
     tokio::spawn(async move {
         let mut resampler: Option<AudioResampler> = None;
         let mut buffers = ResampleBuffers::new(CHANNELS as usize, 1024);
-        // let mut changed_count = 0;
         while let Some((device_rate, data)) = audio_rx.recv().await {
             let target_rate = ACTUAL_SAMPLE_RATE.load(std::sync::atomic::Ordering::Relaxed);
-            // if previous_rate != target_rate{
-            //     previous_rate = target_rate;
-            //     changed_count+=1;
-            // }
-            // log::info!("changed count === {}",changed_count);
+            #[cfg(presure_rate)]
+            presure_rate.diff(target_rate, |count, from, to| {
+                log::info!("changed count === {}, from {} to {}", count, from, to);
+            });
+
             if device_rate == target_rate {
                 resampler = None;
                 let _ = broadcast_tx.send((device_rate, data));
