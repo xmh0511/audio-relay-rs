@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::task::JoinHandle;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio_tungstenite::accept_async;
@@ -148,10 +149,11 @@ pub async fn run_server(host: &str, port: u16, web_port: u16) -> Result<()> {
         }
     });
 
-    let mut capture = start_audio_capture(&state).await?;
+    let (mut capture,relay_handle) = start_audio_capture(&state).await?;
 
     server_handle.await?;
     log::info!("Waiting to clean the capture instance");
+    relay_handle.abort();
     capture.abort().await;
     Ok(())
 }
@@ -178,7 +180,7 @@ impl PresureRate {
     }
 }
 
-async fn start_audio_capture(state: &AppState) -> Result<AudioCapture> {
+async fn start_audio_capture(state: &AppState) -> Result<(AudioCapture,JoinHandle<()>)> {
     let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<(u32, Vec<u8>)>(200);
     let broadcast_tx = state.broadcast_tx.clone();
 
@@ -187,7 +189,7 @@ async fn start_audio_capture(state: &AppState) -> Result<AudioCapture> {
     let mut presure_rate =
         PresureRate::new(ACTUAL_SAMPLE_RATE.load(std::sync::atomic::Ordering::Relaxed));
 
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let mut resampler: Option<AudioResampler> = None;
         let mut buffers = ResampleBuffers::new(CHANNELS as usize, 1024);
         while let Some((device_rate, data)) = audio_rx.recv().await {
@@ -247,7 +249,7 @@ async fn start_audio_capture(state: &AppState) -> Result<AudioCapture> {
     });
 
     log::info!("Audio capture started");
-    Ok(capture)
+    Ok((capture,handle))
 }
 
 fn start_udp_broadcast(_host: &str, port: u16, web_port: u16) {
