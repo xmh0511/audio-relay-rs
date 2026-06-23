@@ -25,6 +25,7 @@ pub type ClientInfo = Arc<RwLock<HashMap<String, ClientEntry>>>;
 #[derive(Clone)]
 pub struct ClientEntry {
     pub client_id: String,
+    pub session_id: String,
     pub addr: SocketAddr,
     pub mode: StreamMode,
     pub latency_ms: f64,
@@ -43,6 +44,7 @@ pub struct ClientEntry {
 impl ClientEntry {
     pub fn new(
         client_id: String,
+        session_id: String,
         addr: SocketAddr,
         mode: StreamMode,
         ws_sender: Arc<Mutex<Option<WsSplitSink>>>,
@@ -50,6 +52,7 @@ impl ClientEntry {
         let now = crate::protocol::timestamp_ms();
         Self {
             client_id,
+            session_id,
             addr,
             mode,
             latency_ms: 0.0,
@@ -312,7 +315,8 @@ async fn handle_connection(
     let ws_sender: Arc<Mutex<Option<WsSplitSink>>> = Arc::new(Mutex::new(Some(ws_sender_raw)));
 
     let mut client_mode: Option<StreamMode> = None;
-    let mut client_id: Option<String> = None;
+    let mut current_client_id: Option<String> = None;
+    let mut current_session_id: Option<String> = None;
 
     let heartbeat_sender = ws_sender.clone();
     let heartbeat_handle = tokio::spawn(async move {
@@ -337,8 +341,8 @@ async fn handle_connection(
         match msg {
             Ok(WsMessage::Text(text)) => {
                 let msg_len = text.len() as u64;
-                if let Some(ref id) = client_id {
-                    if let Some(entry) = clients.write().await.get_mut(id) {
+                if let Some(ref cid) = current_client_id {
+                    if let Some(entry) = clients.write().await.get_mut(cid) {
                         entry.bytes_up += msg_len;
                     }
                 }
@@ -361,8 +365,24 @@ async fn handle_connection(
                             ACTUAL_SAMPLE_RATE.load(std::sync::atomic::Ordering::Relaxed);
 
                         let session_id = uuid::Uuid::new_v4().to_string();
+
+                        // Close old connection from same device
+                        if let Some(old) = clients.write().await.remove(&id) {
+                            log::info!("Closing old connection for device {}", id);
+                            let mut guard = old.ws_sender.lock().await;
+                            if let Some(mut sender) = guard.take() {
+                                let _ = sender
+                                    .send(WsMessage::Close(Some(tungstenite::protocol::CloseFrame {
+                                        code: tungstenite::protocol::frame::coding::CloseCode::Policy,
+                                        reason: "replaced by new connection".into(),
+                                    })))
+                                    .await;
+                                let _ = sender.close().await;
+                            }
+                        }
+
                         let ack = Message::HelloAck {
-                            session_id,
+                            session_id: session_id.clone(),
                             sample_rate: actual_rate,
                             channels: CHANNELS,
                         };
@@ -376,17 +396,18 @@ async fn handle_connection(
 
                         clients.write().await.insert(
                             id.clone(),
-                            ClientEntry::new(id.clone(), addr, mode.clone(), ws_sender.clone()),
+                            ClientEntry::new(id.clone(), session_id.clone(), addr, mode.clone(), ws_sender.clone()),
                         );
 
-                        client_id = Some(id.clone());
+                        current_client_id = Some(id.clone());
+                        current_session_id = Some(session_id.clone());
                         client_mode = Some(mode.clone());
 
                         match mode {
                             StreamMode::Speaker => {
                                 let mut broadcast_rx = broadcast_tx.subscribe();
                                 let speaker_sender = ws_sender.clone();
-                                let client_id_for_task = id.clone();
+                                let device_id_for_task = id.clone();
                                 let clients_clone = clients.clone();
 
                                 tokio::spawn(async move {
@@ -412,7 +433,7 @@ async fn handle_connection(
                                                     {
                                                         log::info!(
                                                             "Speaker {} disconnected",
-                                                            client_id_for_task
+                                                            device_id_for_task
                                                         );
                                                         break;
                                                     }
@@ -420,7 +441,7 @@ async fn handle_connection(
                                                 if let Some(entry) = clients_clone
                                                     .write()
                                                     .await
-                                                    .get_mut(&client_id_for_task)
+                                                    .get_mut(&device_id_for_task)
                                                 {
                                                     entry.bytes_down += bytes_len;
                                                 }
@@ -450,8 +471,8 @@ async fn handle_connection(
                     Some(Message::Pong { timestamp }) => {
                         let now = timestamp_ms();
                         let latency = (now as f64 - timestamp as f64) / 2.0;
-                        if let Some(ref id) = client_id {
-                            if let Some(entry) = clients.write().await.get_mut(id) {
+                        if let Some(ref cid) = current_client_id {
+                            if let Some(entry) = clients.write().await.get_mut(cid) {
                                 entry.latency_ms = latency;
                             }
                         }
@@ -466,8 +487,8 @@ async fn handle_connection(
                         }
                     }
                     Some(Message::LatencyReport { latency_ms }) => {
-                        if let Some(ref id) = client_id {
-                            if let Some(entry) = clients.write().await.get_mut(id) {
+                        if let Some(ref cid) = current_client_id {
+                            if let Some(entry) = clients.write().await.get_mut(cid) {
                                 entry.latency_ms = latency_ms;
                             }
                         }
@@ -480,8 +501,8 @@ async fn handle_connection(
             }
             Ok(WsMessage::Binary(data)) => {
                 let data_len = data.len() as u64;
-                if let Some(ref id) = client_id {
-                    if let Some(entry) = clients.write().await.get_mut(id) {
+                if let Some(ref cid) = current_client_id {
+                    if let Some(entry) = clients.write().await.get_mut(cid) {
                         entry.bytes_up += data_len;
                     }
                 }
@@ -508,9 +529,14 @@ async fn handle_connection(
         let mut guard = ws_sender.lock().await;
         *guard = None;
     }
-    if let Some(id) = &client_id {
-        clients.write().await.remove(id);
-        log::info!("Client {} removed", id);
+    if let (Some(cid), Some(sid)) = (&current_client_id, &current_session_id) {
+        let mut clients_guard = clients.write().await;
+        if let Some(entry) = clients_guard.get(cid) {
+            if entry.session_id == *sid {
+                clients_guard.remove(cid);
+                log::info!("Client {} session {} removed", cid, sid);
+            }
+        }
     }
     log::info!("Connection closed for {}", addr);
 }

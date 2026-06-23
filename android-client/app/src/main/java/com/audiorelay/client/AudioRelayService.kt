@@ -14,6 +14,7 @@ import android.media.AudioTrack
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
@@ -148,15 +149,16 @@ class AudioRelayService : Service() {
     }
 
     private fun sendHello(ws: WebSocket) {
+        val deviceId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: Build.MODEL
         val hello = JSONObject().apply {
             put("Hello", JSONObject().apply {
-                put("client_id", Build.MODEL ?: "Android")
+                put("client_id", deviceId)
                 put("mode", "Speaker")
                 put("sample_rate", SAMPLE_RATE)
                 put("channels", CHANNELS)
             })
         }
-        Log.d(TAG, "Sending Hello")
+        Log.d(TAG, "Sending Hello with device_id=$deviceId")
         ws.send(hello.toString())
     }
 
