@@ -327,18 +327,28 @@ async fn handle_connection(
             let ping = Message::Ping {
                 timestamp: timestamp_ms(),
             };
-            if let Ok(json) = serde_json::to_string(&ping) {
-                let mut guard = heartbeat_sender.lock().await;
-                if let Some(sender) = guard.as_mut() {
+            let json = match serde_json::to_string(&ping) {
+                Ok(j) => j,
+                Err(_) => continue,
+            };
+            let mut guard = heartbeat_sender.lock().await;
+            match guard.as_mut() {
+                Some(sender) => {
                     if sender.send(WsMessage::Text(json)).await.is_err() {
                         break;
                     }
                 }
+                None => break,
             }
         }
     });
 
-    while let Some(msg) = ws_receiver.next().await {
+    while let Ok(Some(msg)) = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        ws_receiver.next(),
+    )
+    .await
+    {
         match msg {
             Ok(WsMessage::Text(text)) => {
                 let msg_len = text.len() as u64;
