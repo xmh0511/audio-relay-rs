@@ -37,8 +37,8 @@ pub struct ClientEntry {
     pub bytes_down_snapshot: u64,
     pub speed_up: f64,
     pub speed_down: f64,
-    #[allow(dead_code)]
     pub ws_sender: Arc<Mutex<Option<WsSplitSink>>>,
+    pub broadcast_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl ClientEntry {
@@ -65,6 +65,7 @@ impl ClientEntry {
             speed_up: 0.0,
             speed_down: 0.0,
             ws_sender,
+            broadcast_handle: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -369,6 +370,11 @@ async fn handle_connection(
                         // Close old connection from same device
                         if let Some(old) = clients.write().await.remove(&id) {
                             log::info!("Closing old connection for device {}", id);
+                            // Abort old broadcast task
+                            if let Some(handle) = old.broadcast_handle.lock().await.take() {
+                                handle.abort();
+                            }
+                            // Close old WebSocket
                             let mut guard = old.ws_sender.lock().await;
                             if let Some(mut sender) = guard.take() {
                                 let _ = sender
@@ -410,7 +416,7 @@ async fn handle_connection(
                                 let device_id_for_task = id.clone();
                                 let clients_clone = clients.clone();
 
-                                tokio::spawn(async move {
+                                let broadcast_handle = tokio::spawn(async move {
                                     let mut seq: u64 = 0;
                                     loop {
                                         match broadcast_rx.recv().await {
@@ -453,6 +459,11 @@ async fn handle_connection(
                                         }
                                     }
                                 });
+
+                                // Store broadcast handle in ClientEntry
+                                if let Some(entry) = clients.write().await.get_mut(&id) {
+                                    *entry.broadcast_handle.lock().await = Some(broadcast_handle);
+                                }
 
                                 log::info!("Client {} set as speaker", id);
                             }
@@ -533,6 +544,9 @@ async fn handle_connection(
         let mut clients_guard = clients.write().await;
         if let Some(entry) = clients_guard.get(cid) {
             if entry.session_id == *sid {
+                if let Some(handle) = entry.broadcast_handle.lock().await.take() {
+                    handle.abort();
+                }
                 clients_guard.remove(cid);
                 log::info!("Client {} session {} removed", cid, sid);
             }
