@@ -203,49 +203,48 @@ async fn start_audio_capture(state: &AppState) -> Result<(AudioCapture,JoinHandl
                 log::info!("changed count === {}, from {} to {}", count, from, to);
             });
 
-            if device_rate == target_rate {
+            let (send_rate, send_data) = if device_rate == target_rate {
                 resampler = None;
-                let _ = broadcast_tx.send((device_rate, data));
-                continue;
-            }
-
-            if resampler.as_ref().map_or(true, |r| {
-                r.source_rate != device_rate || r.target_rate != target_rate
-            }) {
-                resampler = match AudioResampler::new(
-                    device_rate,
-                    target_rate,
-                    CHANNELS as usize,
-                    &mut buffers,
-                ) {
-                    Ok(r) => Some(r),
-                    Err(e) => {
-                        log::error!("Failed to create resampler: {}", e);
-                        None
-                    }
-                };
-            }
-
-            let (send_rate, send_data) = if let Some(ref mut rs) = resampler {
-                let i16_data: Vec<i16> = data
-                    .chunks_exact(2)
-                    .map(|c| i16::from_le_bytes([c[0], c[1]]))
-                    .collect();
-                match rs.resample(&i16_data, &mut buffers) {
-                    Ok(resampled) => {
-                        let mut bytes = Vec::with_capacity(resampled.len() * 2);
-                        for s in resampled {
-                            bytes.extend_from_slice(&s.to_le_bytes());
-                        }
-                        (target_rate, bytes)
-                    }
-                    Err(e) => {
-                        log::warn!("Resample error: {}", e);
-                        (device_rate, data)
-                    }
-                }
-            } else {
                 (device_rate, data)
+            } else {
+                if resampler.as_ref().map_or(true, |r| {
+                    r.source_rate != device_rate || r.target_rate != target_rate
+                }) {
+                    resampler = match AudioResampler::new(
+                        device_rate,
+                        target_rate,
+                        CHANNELS as usize,
+                        &mut buffers,
+                    ) {
+                        Ok(r) => Some(r),
+                        Err(e) => {
+                            log::error!("Failed to create resampler: {}", e);
+                            None
+                        }
+                    };
+                }
+
+                if let Some(ref mut rs) = resampler {
+                    let i16_data: Vec<i16> = data
+                        .chunks_exact(2)
+                        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                        .collect();
+                    match rs.resample(&i16_data, &mut buffers) {
+                        Ok(resampled) => {
+                            let mut bytes = Vec::with_capacity(resampled.len() * 2);
+                            for s in resampled {
+                                bytes.extend_from_slice(&s.to_le_bytes());
+                            }
+                            (target_rate, bytes)
+                        }
+                        Err(e) => {
+                            log::warn!("Resample error: {}", e);
+                            (device_rate, data)
+                        }
+                    }
+                } else {
+                    (device_rate, data)
+                }
             };
 
             let _ = broadcast_tx.send((send_rate, send_data));
@@ -463,7 +462,7 @@ async fn handle_connection(
                                                 }
                                             }
                                             Err(broadcast::error::RecvError::Lagged(n)) => {
-                                                log::debug!("Lagged {} messages", n);
+                                                log::warn!("Speaker {} lagged {} messages", device_id_for_task, n);
                                             }
                                             Err(broadcast::error::RecvError::Closed) => break,
                                         }

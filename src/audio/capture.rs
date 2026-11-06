@@ -237,6 +237,18 @@ fn capture_windows(
         blockalign,
         buffer_frame_count
     );
+    log::info!(
+        "capture format: sample_rate={}Hz channels={} container_bits={} valid_bits={} blockalign={} channel_mask={:#x} sample_type={:?} buffer_frames={} default_period_100ns={}",
+        device_sample_rate,
+        device_channels,
+        bits_per_sample,
+        mix_format.get_validbitspersample(),
+        blockalign,
+        mix_format.get_dwchannelmask(),
+        mix_format.get_subformat(),
+        buffer_frame_count,
+        def_time
+    );
 
     let mut sample_queue: VecDeque<u8> =
         VecDeque::with_capacity(blockalign * buffer_frame_count as usize * 4);
@@ -250,20 +262,45 @@ fn capture_windows(
 
     let mut raw_chunk = vec![0u8; 4096 * blockalign];
     let mut pcm_output = Vec::with_capacity(4096 * blockalign);
-
-    loop {
+    'capture: loop {
         if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
             log::info!("Loopback capture stopping");
             let _ = audio_client.stop_stream();
             break;
         }
 
-        let _ = capture_client.read_from_device_to_deque(&mut sample_queue);
+        let next_packet_frames = match capture_client.get_next_nbr_frames() {
+            Ok(Some(frames)) => frames,
+            Ok(None) => 0,
+            Err(e) => {
+                log::warn!("capture get_next_nbr_frames failed: {:?}", e);
+                0
+            }
+        };
+        let mut packet_read = false;
+        if next_packet_frames > 0 {
+            let queue_before_read = sample_queue.len();
+            match capture_client.read_from_device_to_deque(&mut sample_queue) {
+                Ok(_) => {
+                    let frames = (sample_queue.len() - queue_before_read) / blockalign;
+                    if frames == 0 {
+                        log::warn!(
+                            "capture returned an empty packet while {} frames were pending",
+                            next_packet_frames
+                        );
+                    } else {
+                        packet_read = true;
+                    }
+                }
+                Err(e) => {
+                    log::warn!("capture read failed: {:?}", e);
+                }
+            }
+        }
 
         let frame_size = blockalign;
-        let frames_available = sample_queue.len() / frame_size;
-
-        if frames_available > 0 {
+        while sample_queue.len() >= frame_size {
+            let frames_available = sample_queue.len() / frame_size;
             let frames_to_send = frames_available.min(4096);
             let bytes_to_send = frames_to_send * frame_size;
             raw_chunk.truncate(bytes_to_send);
@@ -305,13 +342,25 @@ fn capture_windows(
                 send_data = pcm_output.clone();
             }
 
-            if tx.try_send((device_sample_rate, send_data)).is_err() {
-                log::warn!("Audio channel send failed, stopping capture");
-                break;
+            if let Err(e) = tx.try_send((device_sample_rate, send_data)) {
+                log::warn!(
+                    "Audio channel send failed ({}), stopping capture",
+                    match e {
+                        mpsc::error::TrySendError::Full(_) => "full",
+                        mpsc::error::TrySendError::Closed(_) => "closed",
+                    }
+                );
+                break 'capture;
             }
         }
 
-        h_event.wait_for_event(10000).ok();
+        if packet_read {
+            continue;
+        }
+
+        if let Err(e) = h_event.wait_for_event(10000) {
+            log::debug!("Loopback event wait ended: {:?}", e);
+        }
     }
 
     log::info!("Loopback capture stopped");
