@@ -262,25 +262,23 @@ fn capture_windows(
 
     let mut raw_chunk = vec![0u8; 4096 * blockalign];
     let mut pcm_output = Vec::with_capacity(4096 * blockalign);
-    loop {
+    'capture: loop {
         if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
             log::info!("Loopback capture stopping");
             let _ = audio_client.stop_stream();
             break;
         }
 
-        let mut next_packet_frames = match capture_client.get_next_nbr_frames() {
+        let next_packet_frames = match capture_client.get_next_nbr_frames() {
             Ok(Some(frames)) => frames,
             Ok(None) => 0,
             Err(e) => {
-                log::warn!(
-                    "capture get_next_nbr_frames failed: {:?}",
-                    e
-                );
+                log::warn!("capture get_next_nbr_frames failed: {:?}", e);
                 0
             }
         };
-        while next_packet_frames > 0 {
+        let mut packet_read = false;
+        if next_packet_frames > 0 {
             let queue_before_read = sample_queue.len();
             match capture_client.read_from_device_to_deque(&mut sample_queue) {
                 Ok(_) => {
@@ -290,32 +288,19 @@ fn capture_windows(
                             "capture returned an empty packet while {} frames were pending",
                             next_packet_frames
                         );
-                        break;
+                    } else {
+                        packet_read = true;
                     }
                 }
                 Err(e) => {
                     log::warn!("capture read failed: {:?}", e);
-                    break;
                 }
             }
-
-            next_packet_frames = match capture_client.get_next_nbr_frames() {
-                Ok(Some(frames)) => frames,
-                Ok(None) => 0,
-                Err(e) => {
-                    log::warn!(
-                        "capture get_next_nbr_frames failed: {:?}",
-                        e
-                    );
-                    0
-                }
-            };
         }
 
         let frame_size = blockalign;
-        let frames_available = sample_queue.len() / frame_size;
-
-        if frames_available > 0 {
+        while sample_queue.len() >= frame_size {
+            let frames_available = sample_queue.len() / frame_size;
             let frames_to_send = frames_available.min(4096);
             let bytes_to_send = frames_to_send * frame_size;
             raw_chunk.truncate(bytes_to_send);
@@ -365,8 +350,12 @@ fn capture_windows(
                         mpsc::error::TrySendError::Closed(_) => "closed",
                     }
                 );
-                break;
+                break 'capture;
             }
+        }
+
+        if packet_read {
+            continue;
         }
 
         if let Err(e) = h_event.wait_for_event(10000) {
