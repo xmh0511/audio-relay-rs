@@ -284,33 +284,65 @@ fn capture_windows(
             break;
         }
 
-        let queue_before_read = sample_queue.len();
-        match capture_client.read_from_device_to_deque(&mut sample_queue) {
-            Ok(flags) => {
-                if diagnostics_enabled {
+        let mut next_packet_frames = match capture_client.get_next_nbr_frames() {
+            Ok(Some(frames)) => frames,
+            Ok(None) => 0,
+            Err(e) => {
+                log::warn!(
+                    target: "audio_diagnostics",
+                    "capture get_next_nbr_frames failed: {:?}",
+                    e
+                );
+                0
+            }
+        };
+        while next_packet_frames > 0 {
+            let queue_before_read = sample_queue.len();
+            match capture_client.read_from_device_to_deque(&mut sample_queue) {
+                Ok(flags) => {
                     let frames = (sample_queue.len() - queue_before_read) / blockalign;
-                    read_count += 1;
-                    captured_frames += frames as u64;
-                    empty_reads += u64::from(frames == 0);
-                    discontinuities += u64::from(flags.data_discontinuity);
-                    silent_packets += u64::from(flags.silent);
-                    timestamp_errors += u64::from(flags.timestamp_error);
-                    max_queue_frames = max_queue_frames.max(sample_queue.len() / blockalign);
-                    match capture_client.get_next_nbr_frames() {
-                        Ok(Some(frames)) if frames > 0 => {
-                            pending_after_read += 1;
-                            max_next_packet_frames = max_next_packet_frames.max(frames);
-                        }
-                        Ok(_) => {}
-                        Err(e) => log::warn!(
+                    if diagnostics_enabled {
+                        read_count += 1;
+                        captured_frames += frames as u64;
+                        empty_reads += u64::from(frames == 0);
+                        discontinuities += u64::from(flags.data_discontinuity);
+                        silent_packets += u64::from(flags.silent);
+                        timestamp_errors += u64::from(flags.timestamp_error);
+                        max_queue_frames = max_queue_frames.max(sample_queue.len() / blockalign);
+                    }
+                    if frames == 0 {
+                        log::warn!(
                             target: "audio_diagnostics",
-                            "capture get_next_nbr_frames failed: {:?}",
-                            e
-                        ),
+                            "capture returned an empty packet while {} frames were pending",
+                            next_packet_frames
+                        );
+                        break;
                     }
                 }
+                Err(e) => {
+                    log::warn!(target: "audio_diagnostics", "capture read failed: {:?}", e);
+                    break;
+                }
             }
-            Err(e) => log::warn!(target: "audio_diagnostics", "capture read failed: {:?}", e),
+
+            next_packet_frames = match capture_client.get_next_nbr_frames() {
+                Ok(Some(frames)) => {
+                    if diagnostics_enabled && frames > 0 {
+                        pending_after_read += 1;
+                        max_next_packet_frames = max_next_packet_frames.max(frames);
+                    }
+                    frames
+                }
+                Ok(None) => 0,
+                Err(e) => {
+                    log::warn!(
+                        target: "audio_diagnostics",
+                        "capture get_next_nbr_frames failed: {:?}",
+                        e
+                    );
+                    0
+                }
+            };
         }
 
         let frame_size = blockalign;
