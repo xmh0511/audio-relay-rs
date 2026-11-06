@@ -237,6 +237,19 @@ fn capture_windows(
         blockalign,
         buffer_frame_count
     );
+    log::info!(
+        target: "audio_diagnostics",
+        "capture format: sample_rate={}Hz channels={} container_bits={} valid_bits={} blockalign={} channel_mask={:#x} sample_type={:?} buffer_frames={} default_period_100ns={}",
+        device_sample_rate,
+        device_channels,
+        bits_per_sample,
+        mix_format.get_validbitspersample(),
+        blockalign,
+        mix_format.get_dwchannelmask(),
+        mix_format.get_subformat(),
+        buffer_frame_count,
+        def_time
+    );
 
     let mut sample_queue: VecDeque<u8> =
         VecDeque::with_capacity(blockalign * buffer_frame_count as usize * 4);
@@ -250,6 +263,19 @@ fn capture_windows(
 
     let mut raw_chunk = vec![0u8; 4096 * blockalign];
     let mut pcm_output = Vec::with_capacity(4096 * blockalign);
+    let diagnostics_enabled = log::log_enabled!(target: "audio_diagnostics", log::Level::Info);
+    let mut diagnostic_start = std::time::Instant::now();
+    let mut read_count = 0u64;
+    let mut captured_frames = 0u64;
+    let mut empty_reads = 0u64;
+    let mut discontinuities = 0u64;
+    let mut silent_packets = 0u64;
+    let mut timestamp_errors = 0u64;
+    let mut pending_after_read = 0u64;
+    let mut max_next_packet_frames = 0u32;
+    let mut max_queue_frames = 0usize;
+    let mut wait_errors = 0u64;
+    let mut last_wait_error = String::new();
 
     loop {
         if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
@@ -258,7 +284,34 @@ fn capture_windows(
             break;
         }
 
-        let _ = capture_client.read_from_device_to_deque(&mut sample_queue);
+        let queue_before_read = sample_queue.len();
+        match capture_client.read_from_device_to_deque(&mut sample_queue) {
+            Ok(flags) => {
+                if diagnostics_enabled {
+                    let frames = (sample_queue.len() - queue_before_read) / blockalign;
+                    read_count += 1;
+                    captured_frames += frames as u64;
+                    empty_reads += u64::from(frames == 0);
+                    discontinuities += u64::from(flags.data_discontinuity);
+                    silent_packets += u64::from(flags.silent);
+                    timestamp_errors += u64::from(flags.timestamp_error);
+                    max_queue_frames = max_queue_frames.max(sample_queue.len() / blockalign);
+                    match capture_client.get_next_nbr_frames() {
+                        Ok(Some(frames)) if frames > 0 => {
+                            pending_after_read += 1;
+                            max_next_packet_frames = max_next_packet_frames.max(frames);
+                        }
+                        Ok(_) => {}
+                        Err(e) => log::warn!(
+                            target: "audio_diagnostics",
+                            "capture get_next_nbr_frames failed: {:?}",
+                            e
+                        ),
+                    }
+                }
+            }
+            Err(e) => log::warn!(target: "audio_diagnostics", "capture read failed: {:?}", e),
+        }
 
         let frame_size = blockalign;
         let frames_available = sample_queue.len() / frame_size;
@@ -305,13 +358,56 @@ fn capture_windows(
                 send_data = pcm_output.clone();
             }
 
-            if tx.try_send((device_sample_rate, send_data)).is_err() {
-                log::warn!("Audio channel send failed, stopping capture");
+            if let Err(e) = tx.try_send((device_sample_rate, send_data)) {
+                log::warn!(
+                    "Audio channel send failed ({}), stopping capture",
+                    match e {
+                        mpsc::error::TrySendError::Full(_) => "full",
+                        mpsc::error::TrySendError::Closed(_) => "closed",
+                    }
+                );
                 break;
             }
         }
 
-        h_event.wait_for_event(10000).ok();
+        if let Err(e) = h_event.wait_for_event(10000) {
+            if diagnostics_enabled {
+                wait_errors += 1;
+                last_wait_error = format!("{:?}", e);
+            }
+        }
+
+        if diagnostics_enabled && diagnostic_start.elapsed() >= std::time::Duration::from_secs(5) {
+            log::info!(
+                target: "audio_diagnostics",
+                "capture: elapsed_ms={} reads={} frames={} empty_reads={} discontinuities={} silent_packets={} timestamp_errors={} reads_with_next_packet={} max_next_packet_frames={} max_queue_frames={} channel_used={} wait_errors={} last_wait_error={}",
+                diagnostic_start.elapsed().as_millis(),
+                read_count,
+                captured_frames,
+                empty_reads,
+                discontinuities,
+                silent_packets,
+                timestamp_errors,
+                pending_after_read,
+                max_next_packet_frames,
+                max_queue_frames,
+                tx.max_capacity() - tx.capacity(),
+                wait_errors,
+                if last_wait_error.is_empty() { "none" } else { &last_wait_error }
+            );
+            diagnostic_start = std::time::Instant::now();
+            read_count = 0;
+            captured_frames = 0;
+            empty_reads = 0;
+            discontinuities = 0;
+            silent_packets = 0;
+            timestamp_errors = 0;
+            pending_after_read = 0;
+            max_next_packet_frames = 0;
+            max_queue_frames = 0;
+            wait_errors = 0;
+            last_wait_error.clear();
+        }
     }
 
     log::info!("Loopback capture stopped");

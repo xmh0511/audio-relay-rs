@@ -157,6 +157,25 @@ cd android-client
 
 推送到 GitHub 后，Actions 会自动构建所有平台的产物。
 
+## 音频诊断日志
+
+服务端默认每约 5 秒输出 `audio_diagnostics` 汇总日志，包含 Windows 采集包标志、
+待读数据、通道积压、采样率、重采样及发送耗时等信息，不包含音频内容。没有采集
+数据时，汇总可能延迟到下一次采集或等待超时。`reads_with_next_packet` 表示读取后
+查询时仍有下一包的次数，`max_queue_frames` 表示程序内部队列而非 WASAPI 缓冲区的
+最大帧数；这些指标本身不能证明发生了丢包或欠载。
+
+Windows PowerShell 中可使用以下命令保存服务端日志：
+
+```powershell
+.\target\release\audio-relay-rs.exe server 2>&1 | Tee-Object -FilePath .\audio-diagnostics.log
+```
+
+复现时请记录正常播放、播放中拖动进度条、出现杂音、暂停并恢复播放的时间，以及
+重启服务或手机重连的时间，便于对应日志。分享日志前可自行检查并删除设备名、
+IP 地址等信息。若不需要诊断日志（包括其警告），可设置
+`$env:RUST_LOG = "info,audio_diagnostics=off"` 后再启动服务。
+
 ## 常见问题
 
 **Q: 手机收不到声音？**
