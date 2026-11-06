@@ -196,21 +196,8 @@ async fn start_audio_capture(state: &AppState) -> Result<(AudioCapture,JoinHandl
     let handle = tokio::spawn(async move {
         let mut resampler: Option<AudioResampler> = None;
         let mut buffers = ResampleBuffers::new(CHANNELS as usize, 1024);
-        let diagnostics_enabled = log::log_enabled!(target: "audio_diagnostics", log::Level::Info);
-        let mut diagnostic_start = std::time::Instant::now();
-        let mut input_frames = 0usize;
-        let mut output_frames = 0usize;
-        let mut chunks = 0usize;
-        let mut empty_output_chunks = 0usize;
-        let mut max_input_queue = 0usize;
-        let mut rate_fallbacks = 0usize;
         while let Some((device_rate, data)) = audio_rx.recv().await {
             let target_rate = ACTUAL_SAMPLE_RATE.load(std::sync::atomic::Ordering::Relaxed);
-            if diagnostics_enabled {
-                chunks += 1;
-                input_frames += data.len() / 2;
-                max_input_queue = max_input_queue.max(audio_rx.len());
-            }
             #[cfg(presure_rate)]
             presure_rate.diff(target_rate, |count, from, to| {
                 log::info!("changed count === {}, from {} to {}", count, from, to);
@@ -260,36 +247,6 @@ async fn start_audio_capture(state: &AppState) -> Result<(AudioCapture,JoinHandl
                 }
             };
 
-            if diagnostics_enabled {
-                output_frames += send_data.len() / 2;
-                empty_output_chunks += usize::from(send_data.is_empty());
-                rate_fallbacks += usize::from(send_rate != target_rate);
-                if diagnostic_start.elapsed() >= std::time::Duration::from_secs(5) {
-                    log::info!(
-                        target: "audio_diagnostics",
-                        "relay: elapsed_ms={} source_rate={}Hz target_rate={}Hz output_rate={}Hz resampling={} chunks={} input_samples={} output_samples={} empty_output_chunks={} rate_fallbacks={} max_input_queue={} subscribers={}",
-                        diagnostic_start.elapsed().as_millis(),
-                        device_rate,
-                        target_rate,
-                        send_rate,
-                        resampler.is_some(),
-                        chunks,
-                        input_frames,
-                        output_frames,
-                        empty_output_chunks,
-                        rate_fallbacks,
-                        max_input_queue,
-                        broadcast_tx.receiver_count()
-                    );
-                    diagnostic_start = std::time::Instant::now();
-                    chunks = 0;
-                    input_frames = 0;
-                    output_frames = 0;
-                    empty_output_chunks = 0;
-                    rate_fallbacks = 0;
-                    max_input_queue = 0;
-                }
-            }
             let _ = broadcast_tx.send((send_rate, send_data));
         }
     });
@@ -470,21 +427,9 @@ async fn handle_connection(
 
                                 let broadcast_handle = tokio::spawn(async move {
                                     let mut seq: u64 = 0;
-                                    let diagnostics_enabled = log::log_enabled!(target: "audio_diagnostics", log::Level::Info);
-                                    let mut diagnostic_start = std::time::Instant::now();
-                                    let mut sent_frames = 0u64;
-                                    let mut sent_samples = 0usize;
-                                    let mut max_broadcast_queue = 0usize;
-                                    let mut max_send_time = std::time::Duration::ZERO;
-                                    let mut lagged_messages = 0u64;
                                     loop {
                                         match broadcast_rx.recv().await {
                                             Ok((rate, data)) => {
-                                                if diagnostics_enabled {
-                                                    sent_frames += 1;
-                                                    sent_samples += data.len() / 2;
-                                                    max_broadcast_queue = max_broadcast_queue.max(broadcast_rx.len());
-                                                }
                                                 let frame = AudioFrame {
                                                     sequence: seq,
                                                     timestamp: timestamp_ms(),
@@ -496,7 +441,6 @@ async fn handle_connection(
                                                 let bytes_len = binary.len() as u64;
                                                 let mut guard = speaker_sender.lock().await;
                                                 if let Some(sender) = guard.as_mut() {
-                                                    let send_start = std::time::Instant::now();
                                                     if sender
                                                         .send(WsMessage::Binary(binary))
                                                         .await
@@ -508,28 +452,6 @@ async fn handle_connection(
                                                         );
                                                         break;
                                                     }
-                                                    if diagnostics_enabled {
-                                                        max_send_time = max_send_time.max(send_start.elapsed());
-                                                    }
-                                                }
-                                                if diagnostics_enabled && diagnostic_start.elapsed() >= std::time::Duration::from_secs(5) {
-                                                    log::info!(
-                                                        target: "audio_diagnostics",
-                                                        "speaker: client={} elapsed_ms={} frames={} samples={} max_broadcast_queue={} lagged_messages={} max_send_ms={:.2}",
-                                                        device_id_for_task,
-                                                        diagnostic_start.elapsed().as_millis(),
-                                                        sent_frames,
-                                                        sent_samples,
-                                                        max_broadcast_queue,
-                                                        lagged_messages,
-                                                        max_send_time.as_secs_f64() * 1000.0
-                                                    );
-                                                    diagnostic_start = std::time::Instant::now();
-                                                    sent_frames = 0;
-                                                    sent_samples = 0;
-                                                    max_broadcast_queue = 0;
-                                                    max_send_time = std::time::Duration::ZERO;
-                                                    lagged_messages = 0;
                                                 }
                                                 if let Some(entry) = clients_clone
                                                     .write()
@@ -540,8 +462,7 @@ async fn handle_connection(
                                                 }
                                             }
                                             Err(broadcast::error::RecvError::Lagged(n)) => {
-                                                lagged_messages += n;
-                                                log::warn!(target: "audio_diagnostics", "speaker client={} lagged {} messages", device_id_for_task, n);
+                                                log::warn!("Speaker {} lagged {} messages", device_id_for_task, n);
                                             }
                                             Err(broadcast::error::RecvError::Closed) => break,
                                         }
